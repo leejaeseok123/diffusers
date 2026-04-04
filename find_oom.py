@@ -2,15 +2,22 @@ import torch
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 import time
 import numpy as np
+import csv
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # -----------------------
-# OOM 탐색 설정
+# OOM 탐색 설정 (범위 확장)
 # -----------------------
-batch_sizes = [48, 50, 52, 54, 56, 58, 60, 62, 64]
+batch_sizes = list(range(40, 97, 2))   # 40~96 step 2
 timestep = 100
-num_runs = 1   # OOM 탐색은 1번이면 충분
+num_runs = 1
+
+# -----------------------
+# CSV 저장
+# -----------------------
+csv_file = "oom_search_results.csv"
+results = []
 
 # -----------------------
 # 프롬프트
@@ -39,7 +46,7 @@ prompt_pool = [
 ] * 10
 
 # -----------------------
-# Scheduler (하나만)
+# Scheduler
 # -----------------------
 scheduler = DDIMScheduler.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
@@ -89,10 +96,22 @@ for batch in batch_sizes:
             f"{throughput:.2f} img/s | {peak:.2f} GB"
         )
 
+        results.append([batch, latency, throughput, peak])
+
     except RuntimeError as e:
         if "out of memory" in str(e):
             print(f"OOM 발생 at batch={batch}")
-            torch.cuda.empty_cache()
+            results.append([batch, "OOM", "OOM", "OOM"])
             break
         else:
             raise e
+
+# -----------------------
+# CSV 저장
+# -----------------------
+with open(csv_file, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["batch_size", "latency", "throughput", "peak_memory_GB"])
+    writer.writerows(results)
+
+print(f"\n결과 저장 완료 → {csv_file}")
