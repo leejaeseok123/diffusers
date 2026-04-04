@@ -1,23 +1,16 @@
 import torch
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 import time
-import numpy as np
 import csv
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda"
 
 # -----------------------
-# OOM 탐색 설정 (범위 확장)
+# OOM 탐색 설정
 # -----------------------
-batch_sizes = list(range(40, 97, 2))   # 40~96 step 2
-timestep = 100
-num_runs = 1
-
-# -----------------------
-# CSV 저장
-# -----------------------
-csv_file = "oom_search_results.csv"
-results = []
+batch_sizes = list(range(40, 101, 2))   # 넓게 탐색
+timestep = 200                          # worst case 기준
+csv_file = "oom_boundary.csv"
 
 # -----------------------
 # 프롬프트
@@ -46,7 +39,7 @@ prompt_pool = [
 ] * 10
 
 # -----------------------
-# Scheduler
+# 모델 로드 (한번만)
 # -----------------------
 scheduler = DDIMScheduler.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
@@ -59,15 +52,11 @@ pipe = StableDiffusionPipeline.from_pretrained(
     torch_dtype=torch.float16
 ).to(device)
 
-total_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
-print(f"GPU Total Memory: {total_mem:.2f} GB")
+results = []
 
 print("Batch | Latency | Throughput | PeakMem")
-print("-----------------------------------------")
+print("----------------------------------------")
 
-# -----------------------
-# OOM 탐색 loop
-# -----------------------
 for batch in batch_sizes:
     try:
         prompts = prompt_pool[:batch]
@@ -91,10 +80,7 @@ for batch in batch_sizes:
         peak = torch.cuda.max_memory_allocated() / 1024**3
         throughput = batch / latency
 
-        print(
-            f"{batch} | {latency:.3f}s | "
-            f"{throughput:.2f} img/s | {peak:.2f} GB"
-        )
+        print(f"{batch} | {latency:.2f}s | {throughput:.2f} img/s | {peak:.2f} GB")
 
         results.append([batch, latency, throughput, peak])
 
@@ -106,12 +92,10 @@ for batch in batch_sizes:
         else:
             raise e
 
-# -----------------------
 # CSV 저장
-# -----------------------
 with open(csv_file, "w", newline="") as f:
     writer = csv.writer(f)
-    writer.writerow(["batch_size", "latency", "throughput", "peak_memory_GB"])
+    writer.writerow(["batch", "latency", "throughput", "peak_memory_GB"])
     writer.writerows(results)
 
-print(f"\n결과 저장 완료 → {csv_file}")
+print(f"\nSaved → {csv_file}")
