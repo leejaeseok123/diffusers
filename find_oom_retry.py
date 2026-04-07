@@ -8,7 +8,7 @@ device = "cuda"
 # -----------------------
 # OOM 탐색 설정
 # -----------------------
-batch_sizes = list(range(100, 110, 1))
+batch_sizes = list(range(109, 200, 1))
 timestep = 200
 csv_file = "oom_boundary_retry.csv"
 
@@ -36,7 +36,7 @@ prompt_pool = [
     "a desert landscape",
     "a macro flower",
     "a night skyline"
-] * 10
+] * 20   # batch 200 대비
 
 # -----------------------
 # 모델 로드
@@ -53,6 +53,7 @@ pipe = StableDiffusionPipeline.from_pretrained(
 ).to(device)
 
 results = []
+oom_batch = None
 
 print("Batch | Latency | Throughput | PeakMem")
 print("----------------------------------------")
@@ -88,7 +89,9 @@ for batch in batch_sizes:
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
             print(f"OOM 발생 at batch={batch}")
-            results.append([batch, "OOM", "OOM", "OOM"])
+
+            results.append([batch, None, None, "OOM"])
+            oom_batch = batch
 
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -105,3 +108,7 @@ with open(csv_file, "w", newline="") as f:
     writer.writerows(results)
 
 print(f"\nSaved → {csv_file}")
+
+if oom_batch:
+    print(f"OOM 발생 batch = {oom_batch}")
+    print(f"Safe batch ≈ {oom_batch - 2}")
