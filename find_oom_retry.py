@@ -9,7 +9,7 @@ device = "cuda"
 # -----------------------
 # OOM 탐색 설정
 # -----------------------
-batch_sizes = list(range(52, 60, 1))
+batch_sizes = list(range(48, 57, 1))
 timestep = 200
 csv_file = "oom_boundary_retry.csv"
 
