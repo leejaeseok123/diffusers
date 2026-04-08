@@ -2,13 +2,14 @@ import torch
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 import time
 import csv
+import gc
 
 device = "cuda"
 
 # -----------------------
 # OOM 탐색 설정
 # -----------------------
-batch_sizes = list(range(60, 80, 1))
+batch_sizes = list(range(50, 90, 1))
 timestep = 200
 csv_file = "oom_boundary_retry.csv"
 
@@ -36,7 +37,7 @@ prompt_pool = [
     "a desert landscape",
     "a macro flower",
     "a night skyline"
-] * 20   # batch 200 대비
+] * 20
 
 # -----------------------
 # 모델 로드
@@ -64,12 +65,13 @@ for batch in batch_sizes:
 
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+        gc.collect()
         torch.cuda.synchronize()
 
         start = time.time()
 
         with torch.inference_mode():
-            _ = pipe(
+            images = pipe(
                 prompts,
                 num_inference_steps=timestep,
                 guidance_scale=7.5
@@ -85,6 +87,11 @@ for batch in batch_sizes:
         print(f"{batch} | {latency:.2f}s | {throughput:.2f} img/s | {peak:.2f} GB")
 
         results.append([batch, latency, throughput, peak])
+
+        # -------- 메모리 해제 (중요) --------
+        del images
+        gc.collect()
+        torch.cuda.empty_cache()
 
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
