@@ -53,7 +53,11 @@ pipe = StableDiffusionPipeline.from_pretrained(
 
 # DDIM 스케줄러 적용 및 성능 옵션 활성화
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-pipe.enable_xformers_memory_efficient_attention()
+try:
+    pipe.enable_xformers_memory_efficient_attention()
+    print("[*] xformers 활성화 완료")
+except ModuleNotFoundError:
+    print("[!] xformers 미설치 - 건너뜁니다. (pip install xformers 로 설치 가능)")
 
 # torch.compile: Ada 아키텍처의 연산 효율을 극대화
 try:
