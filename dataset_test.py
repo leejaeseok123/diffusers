@@ -53,18 +53,8 @@ pipe = StableDiffusionPipeline.from_pretrained(
 
 # DDIM 스케줄러 적용 및 성능 옵션 활성화
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-try:
-    pipe.enable_xformers_memory_efficient_attention()
-    print("[*] xformers 활성화 완료")
-except ModuleNotFoundError:
-    print("[!] xformers 미설치 - 건너뜁니다. (pip install xformers 로 설치 가능)")
 
 # torch.compile: Ada 아키텍처의 연산 효율을 극대화
-try:
-    print("[*] torch.compile 시작 (최적화 분석을 위해 수 분이 소요될 수 있습니다)...")
-    pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead")
-except Exception as e:
-    print(f"[!] torch.compile 건너뜀: {e}")
 
 pipe.set_progress_bar_config(disable=True)
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images_to_gen)
