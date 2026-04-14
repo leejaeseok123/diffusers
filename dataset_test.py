@@ -22,7 +22,7 @@ csv_output_file = "performance_results_final.csv"
 batch_sizes = list(range(10, 131, 10))  # 8, 16, 24, ..., 128
 step_sizes = [10, 20, 30, 50, 75, 100, 150]
 num_runs = 3
-total_images_to_gen = 10000
+total_images_to_gen = 1000
 
 def load_coco_prompts(json_path, num_samples):
     print(f"[*] Loading COCO prompts from {json_path}...")
