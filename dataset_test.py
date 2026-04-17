@@ -15,7 +15,7 @@ device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
 csv_output_file = "batch_scaling_results.csv"
 
-batch_sizes = list(range(1, 11, 1))
+batch_sizes = list(range(1, 30, 1))
 step_sizes = [10, 20, 30, 50, 75]
 num_runs = 2
 
