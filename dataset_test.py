@@ -8,34 +8,37 @@ import os
 import gc
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 
-# print 실시간 출력 (버퍼링 제거)
 sys.stdout.reconfigure(line_buffering=True)
 
-# -----------------------
-# 1. 환경 설정 및 데이터 로드
-# -----------------------
 device = "cuda"
+
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "performance_results_final.csv"
+csv_output_file = "batch_scaling_results.csv"
 
-# 실험 변수 설정 (B=1 제외 - 너무 느림)
-batch_sizes = list(range(10, 131, 10))  # 8, 16, 24, ..., 128
-step_sizes = [10, 20, 30, 50, 75, 100, 150]
-num_runs = 3
-total_images_to_gen = 1000
+batch_sizes = list(range(10, 121, 10))
+step_sizes = [10, 20, 30, 50, 75, 100]
+num_runs = 2
 
+
+# -----------------------
+# COCO prompt 로드
+# -----------------------
 def load_coco_prompts(json_path, num_samples):
-    print(f"[*] Loading COCO prompts from {json_path}...")
+    print(f"[*] Loading COCO prompts...")
     with open(json_path, 'r') as f:
         data = json.load(f)
-    all_captions = [ann['caption'] for ann in data['annotations']]
-    unique_captions = list(set(all_captions))
-    return random.sample(unique_captions, num_samples)
+    captions = list(set([ann['caption'] for ann in data['annotations']]))
+    return random.sample(captions, num_samples)
+
+
+prompt_pool = load_coco_prompts(coco_annotation_path, 500)
+
 
 # -----------------------
-# 2. 모델 로드
+# 모델 로드
 # -----------------------
-print("[*] Loading Stable Diffusion Model (v1.5)...")
+print("[*] Loading model...")
+
 pipe = StableDiffusionPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
     torch_dtype=torch.float16,
@@ -44,77 +47,96 @@ pipe = StableDiffusionPipeline.from_pretrained(
 
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
 
-# xformers 설치된 경우만 활성화
 try:
     pipe.enable_xformers_memory_efficient_attention()
-    print("[*] xformers 활성화 완료")
-except ModuleNotFoundError:
-    print("[!] xformers 미설치 - 건너뜁니다")
+    print("[*] xformers ON")
+except:
+    print("[!] xformers 없음")
 
 pipe.set_progress_bar_config(disable=True)
-prompt_pool = load_coco_prompts(coco_annotation_path, total_images_to_gen)
+
 
 # -----------------------
-# 3. Warm-up (1회)
+# Warm-up
 # -----------------------
-print("\n[*] GPU Warm-up 1회 진행 중...")
+print("[*] Warm-up...")
 with torch.inference_mode():
     _ = pipe(prompt_pool[:2], num_inference_steps=20)
 torch.cuda.synchronize()
-print("[*] 준비 완료! 본 실험을 시작합니다.\n")
+
 
 # -----------------------
-# 4. 메인 실험 루프
+# CSV 초기화
 # -----------------------
 with open(csv_output_file, 'w', newline='') as f:
     writer = csv.writer(f)
-    writer.writerow(["Run", "Batch", "Steps", "Total_Time_s", "Latency_s_per_img", "Throughput_img_s", "Peak_Mem_GB"])
+    writer.writerow([
+        "Run", "Batch", "Steps",
+        "Batch_Latency_s",
+        "User_Latency_s",        # ★ 추가
+        "Throughput_img_s",
+        "Peak_Mem_GB"
+    ])
 
-print(f"{'Run':<5} | {'Batch':<6} | {'Steps':<6} | {'Latency(s/img)':<15} | {'Throughput':<12} | {'PeakMem':<8}")
+print("\nRun | Batch | Step | BatchLat | UserLat | Throughput | PeakMem")
 print("-" * 85)
 
+
+# -----------------------
+# 메인 실험
+# -----------------------
 for run in range(1, num_runs + 1):
     for T in step_sizes:
         for B in batch_sizes:
+
             try:
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.reset_peak_memory_stats()
-
                 torch.cuda.synchronize()
-                start_time = time.time()
+
+                prompts = prompt_pool[:B]
+
+                start = time.time()
 
                 with torch.inference_mode():
-                    for i in range(0, total_images_to_gen, B):
-                        current_batch = prompt_pool[i : i + B]
-                        if not current_batch:
-                            break
-                        _ = pipe(current_batch, num_inference_steps=T).images
+                    _ = pipe(
+                        prompts,
+                        num_inference_steps=T
+                    ).images
 
                 torch.cuda.synchronize()
-                end_time = time.time()
+                end = time.time()
 
-                total_elapsed = end_time - start_time
-                latency_per_img = total_elapsed / total_images_to_gen
-                throughput = total_images_to_gen / total_elapsed
+                batch_latency = end - start
+                user_latency = batch_latency / B   
+                throughput = B / batch_latency
                 peak_mem = torch.cuda.max_memory_allocated() / 1024**3
 
-                print(f"{run:<5} | {B:<6} | {T:<6} | {latency_per_img:<15.4f} | {throughput:<12.2f} | {peak_mem:<8.2f}")
+                print(f"{run:<3} | {B:<5} | {T:<4} | {batch_latency:<8.2f} | {user_latency:<8.3f} | {throughput:<10.2f} | {peak_mem:<8.2f}")
 
                 with open(csv_output_file, 'a', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow([run, B, T, total_elapsed, latency_per_img, throughput, peak_mem])
+                    writer.writerow([
+                        run, B, T,
+                        batch_latency,
+                        user_latency,
+                        throughput,
+                        peak_mem
+                    ])
 
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
-                    print(f"{run:<5} | {B:<6} | {T:<6} | {'OOM (Skipping larger batches)':<35}")
+                    print(f"{run:<3} | {B:<5} | {T:<4} | OOM")
+
                     with open(csv_output_file, 'a', newline='') as f:
                         writer = csv.writer(f)
                         writer.writerow([run, B, T, "OOM", "OOM", "OOM", "OOM"])
+
                     torch.cuda.empty_cache()
                     gc.collect()
                     break
                 else:
                     raise e
 
-print(f"\n[!] 실험 완료! 결과 파일: {os.path.abspath(csv_output_file)}")
+print(f"\n[✔] 완료 → {os.path.abspath(csv_output_file)}")
