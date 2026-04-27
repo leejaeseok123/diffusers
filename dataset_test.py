@@ -52,10 +52,10 @@ monitor = GPUUtilMonitor(handle)
 # -----------------------
 device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "rtx6000_scaling.csv"
+csv_output_file = "sd_v15_scaling.csv"
 
-total_images = 1000          # 항상 고정된 총 이미지 수
-batch_sizes = list(range(2, 65, 2))   # 2, 4, 6, ..., 64
+total_images = 1000
+batch_sizes = list(range(2, 65, 2))
 step_sizes = [10, 20, 50]
 num_runs = 2
 
@@ -74,12 +74,12 @@ def load_coco_prompts(json_path, num_samples):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# 모델 로드
+# 모델 로드 (SD v1.5 - 512x512)
 # -----------------------
-print("[*] Loading Stable Diffusion v1.5...")
+print("[*] Loading SD v1.5 (512x512)...")
 pipe = StableDiffusionPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
-    torch_dtype=torch.bfloat16,
+    torch_dtype=torch.float16,
     safety_checker=None
 ).to(device)
 
@@ -94,11 +94,11 @@ except:
 pipe.set_progress_bar_config(disable=True)
 
 # -----------------------
-# Warm-up (1회)
+# Warm-up
 # -----------------------
 print("[*] GPU Warm-up 중...")
 with torch.inference_mode():
-    _ = pipe(prompt_pool[:2], num_inference_steps=20)
+    _ = pipe(prompt_pool[:2], num_inference_steps=20, height=512, width=512)
 torch.cuda.synchronize()
 print("[*] Warm-up 완료! 실험 시작합니다.\n")
 
@@ -109,11 +109,12 @@ with open(csv_output_file, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow([
         "Run", "Batch", "Steps", "Total_Time_s",
-        "Latency_s_per_img", "Throughput_img_s", "Peak_Mem_GB", "GPU_Util_%"
+        "Throughput_Latency_s", "Throughput_img_s",
+        "Query_Latency_s", "Peak_Mem_GB", "GPU_Util_%"
     ])
 
-print(f"{'Run':<4} | {'Batch':<6} | {'Steps':<6} | {'Total(s)':<10} | {'Latency':<10} | {'Throughput':<12} | {'PeakMem':<9} | {'GPU%':<6}")
-print("-" * 90)
+print(f"{'Run':<4} | {'Batch':<6} | {'Steps':<6} | {'Throughput_Lat':<15} | {'Throughput':<12} | {'Query_Lat':<10} | {'PeakMem':<9} | {'GPU%':<6}")
+print("-" * 100)
 
 # -----------------------
 # 메인 실험 루프
@@ -127,31 +128,48 @@ for run in range(1, num_runs + 1):
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
 
+                # -----------------------------------------------
+                # 1. Throughput 측정 (1000장 전체 처리)
+                # -----------------------------------------------
                 monitor.start()
                 start = time.time()
 
-                # 핵심: 항상 total_images장을 B씩 나눠서 생성
                 with torch.inference_mode():
                     for i in range(0, total_images, B):
                         current_batch = prompt_pool[i:i+B]
                         if not current_batch:
                             break
-                        _ = pipe(current_batch, num_inference_steps=T).images
+                        _ = pipe(current_batch, num_inference_steps=T,
+                                height=512, width=512).images
 
                 torch.cuda.synchronize()
                 end = time.time()
                 avg_gpu_util = monitor.stop()
 
                 total_elapsed = end - start
-                latency = total_elapsed / total_images
+                throughput_latency = total_elapsed / total_images
                 throughput = total_images / total_elapsed
                 peak_mem = torch.cuda.max_memory_allocated() / 1024**3
 
-                print(f"{run:<4} | {B:<6} | {T:<6} | {total_elapsed:<10.2f} | {latency:<10.4f} | {throughput:<12.2f} | {peak_mem:<9.2f} | {avg_gpu_util:<6.1f}")
+                # -----------------------------------------------
+                # 2. Query Latency 측정 (배치 1번만 처리)
+                # -----------------------------------------------
+                torch.cuda.synchronize()
+                query_start = time.time()
+
+                with torch.inference_mode():
+                    _ = pipe(prompt_pool[:B], num_inference_steps=T,
+                            height=512, width=512).images
+
+                torch.cuda.synchronize()
+                query_latency = time.time() - query_start
+
+                print(f"{run:<4} | {B:<6} | {T:<6} | {throughput_latency:<15.4f} | {throughput:<12.2f} | {query_latency:<10.4f} | {peak_mem:<9.2f} | {avg_gpu_util:<6.1f}")
 
                 with open(csv_output_file, 'a', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow([run, B, T, total_elapsed, latency, throughput, peak_mem, avg_gpu_util])
+                    writer.writerow([run, B, T, total_elapsed, throughput_latency,
+                                   throughput, query_latency, peak_mem, avg_gpu_util])
 
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
@@ -159,7 +177,7 @@ for run in range(1, num_runs + 1):
                     monitor.stop()
                     with open(csv_output_file, 'a', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow([run, B, T, "OOM", "OOM", "OOM", "OOM", "OOM"])
+                        writer.writerow([run, B, T, "OOM", "OOM", "OOM", "OOM", "OOM", "OOM"])
                     torch.cuda.empty_cache()
                     gc.collect()
                     break
