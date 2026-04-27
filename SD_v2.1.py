@@ -15,7 +15,7 @@ from pynvml import *
 sys.stdout.reconfigure(line_buffering=True)
 
 # -----------------------
-# 0. 재현성 고정
+# 재현성 고정
 # -----------------------
 SEED = 42
 random.seed(SEED)
@@ -46,15 +46,13 @@ class GPUUtilMonitor:
             try:
                 util = nvmlDeviceGetUtilizationRates(self.handle)
                 self.utils.append(util.gpu)
-            except:
-                pass
+            except: pass
             time.sleep(0.01)
 
     def stop(self):
         self.stopped = True
         self.thread.join()
-        if not self.utils:
-            return 0
+        if not self.utils: return 0
         return sum(self.utils) / len(self.utils)
 
 monitor = GPUUtilMonitor(handle)
@@ -63,19 +61,20 @@ monitor = GPUUtilMonitor(handle)
 # 실험 설정
 # -----------------------
 device = "cuda"
-
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
 csv_output_file = "SD_v2.1_scaling.csv"
 
 total_images = 300
-batch_sizes = list(range(2, 20, 2))
-step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
-num_runs = 1
+batch_sizes  = list(range(2, 20, 2))
+step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
+num_runs     = 1
+H, W         = 768, 768
 
 # -----------------------
-# 데이터 로드 (고정)
+# 데이터 로드
 # -----------------------
 def load_coco_prompts(json_path, num_samples):
+    print("[*] Loading COCO prompts...")
     with open(json_path, 'r') as f:
         data = json.load(f)
     captions = list(set([ann['caption'] for ann in data['annotations']]))
@@ -85,10 +84,9 @@ def load_coco_prompts(json_path, num_samples):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# 모델 로드
+# 모델 로드 (SD v2.1 768x768)
 # -----------------------
-print("[*] Loading model...")
-
+print("[*] Loading SD v2.1 (768x768)...")
 pipe = StableDiffusionPipeline.from_pretrained(
     "stabilityai/stable-diffusion-2-1",
     torch_dtype=torch.float16,
@@ -96,7 +94,6 @@ pipe = StableDiffusionPipeline.from_pretrained(
 ).to(device)
 
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-
 pipe.enable_attention_slicing()
 
 try:
@@ -110,10 +107,11 @@ pipe.set_progress_bar_config(disable=True)
 # -----------------------
 # Warm-up
 # -----------------------
-print("[*] Warm-up...")
+print("[*] Warm-up 중...")
 with torch.inference_mode():
-    _ = pipe(prompt_pool[:2], num_inference_steps=20)
+    _ = pipe(prompt_pool[:2], num_inference_steps=20, height=H, width=W)
 torch.cuda.synchronize()
+print("[*] Warm-up 완료! 실험 시작합니다.\n")
 
 # -----------------------
 # CSV 초기화
@@ -129,92 +127,72 @@ with open(csv_output_file, 'w', newline='') as f:
         "GPU_Util_%"
     ])
 
-print("\nRun | Batch | Step | SystemLat | UserLat | Throughput | PeakMem | GPU%")
+print(f"{'Run':<4} | {'Batch':<6} | {'Steps':<6} | {'SystemLat':<11} | {'UserLat':<9} | {'Throughput':<12} | {'PeakMem':<9} | {'GPU%':<6}")
 print("-" * 95)
 
 # -----------------------
-# 메인 실험
+# 메인 실험 루프
 # -----------------------
 for run in range(1, num_runs + 1):
     for T in step_sizes:
         for B in batch_sizes:
-
             try:
                 torch.cuda.empty_cache()
                 gc.collect()
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
 
-                # -------------------------
-                # 1. SYSTEM LATENCY + THROUGHPUT
-                # -------------------------
+                # -----------------------------------------------
+                # 1. System Latency + Throughput (전체 처리)
+                # -----------------------------------------------
                 monitor.start()
                 start = time.time()
 
                 with torch.inference_mode():
                     for i in range(0, total_images, B):
                         batch_prompts = prompt_pool[i:i+B]
-
-                        # 🔥 매 batch마다 generator 초기화
+                        if not batch_prompts: break
                         generator = torch.Generator(device="cuda").manual_seed(SEED)
-
-                        _ = pipe(
-                            batch_prompts,
-                            num_inference_steps=T,
-                            generator=generator
-                        ).images
+                        _ = pipe(batch_prompts, num_inference_steps=T,
+                                height=H, width=W, generator=generator).images
 
                 torch.cuda.synchronize()
                 end = time.time()
                 gpu_util = monitor.stop()
 
-                total_time = end - start
-                system_latency = total_time / total_images
-                throughput = total_images / total_time
-                peak_mem = torch.cuda.max_memory_allocated() / 1024**3
+                total_time      = end - start
+                system_latency  = total_time / total_images
+                throughput      = total_images / total_time
+                peak_mem        = torch.cuda.max_memory_allocated() / 1024**3
 
-                # -------------------------
-                # 2. USER LATENCY (단일 요청 기준)
-                # -------------------------
+                # -----------------------------------------------
+                # 2. User Latency (배치 1번 처리 = 사용자 대기시간)
+                # -----------------------------------------------
                 torch.cuda.synchronize()
-                q_start = time.time()
-
-                generator = torch.Generator(device="cuda").manual_seed(SEED)
+                u_start = time.time()
 
                 with torch.inference_mode():
-                    _ = pipe(
-                        [prompt_pool[0]],   # 🔥 핵심 수정 (single request)
-                        num_inference_steps=T,
-                        generator=generator
-                    ).images
+                    generator = torch.Generator(device="cuda").manual_seed(SEED)
+                    _ = pipe(prompt_pool[:B], num_inference_steps=T,
+                            height=H, width=W, generator=generator).images
 
                 torch.cuda.synchronize()
-                q_end = time.time()
+                user_latency = time.time() - u_start
 
-                user_latency = q_end - q_start
-
-                print(f"{run:<3} | {B:<5} | {T:<4} | {system_latency:<9.4f} | {user_latency:<8.4f} | {throughput:<10.2f} | {peak_mem:<8.2f} | {gpu_util:<6.1f}")
+                print(f"{run:<4} | {B:<6} | {T:<6} | {system_latency:<11.4f} | {user_latency:<9.4f} | {throughput:<12.2f} | {peak_mem:<9.2f} | {gpu_util:<6.1f}")
 
                 with open(csv_output_file, 'a', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow([
-                        run, B, T,
-                        system_latency,
-                        user_latency,
-                        throughput,
-                        peak_mem,
-                        gpu_util
-                    ])
+                    writer.writerow([run, B, T, system_latency, user_latency,
+                                    throughput, peak_mem, gpu_util])
 
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
-                    print(f"{run:<3} | {B:<5} | {T:<4} | OOM")
+                    print(f"{run:<4} | {B:<6} | {T:<6} | OOM")
                     monitor.stop()
-
                     with open(csv_output_file, 'a', newline='') as f:
                         writer = csv.writer(f)
                         writer.writerow([run, B, T, "OOM", "OOM", "OOM", "OOM", "OOM"])
-
                     torch.cuda.empty_cache()
                     gc.collect()
                     break
