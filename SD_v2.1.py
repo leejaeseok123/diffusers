@@ -88,7 +88,7 @@ prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 # -----------------------
 print("[*] Loading SD v2.1 (768x768)...")
 pipe = StableDiffusionPipeline.from_pretrained(
-    "sd2-community/stable-diffusion-2-1",
+    "Manojb/stable-diffusion-2-1-base",
     torch_dtype=torch.float16,
     safety_checker=None
 ).to(device)
