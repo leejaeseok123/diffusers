@@ -26,7 +26,7 @@ step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 H, W = 512, 512
 
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-real_images_path     = "/home/jslee/diffusion_exper/batch_exper/fid/real_10k"
+real_images_path     = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/val2014/real_10k"
 generated_root       = "/home/jslee/diffusion_exper/batch_exper/fid/generated"
 csv_output_file      = "/home/jslee/diffusion_exper/batch_exper/fid/results/fid_results.csv"
 
