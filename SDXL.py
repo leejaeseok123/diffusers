@@ -51,7 +51,8 @@ class GPUUtilMonitor:
 
     def stop(self):
         self.stopped = True
-        self.thread.join()
+        if hasattr(self, 'thread'):
+            self.thread.join()
         if not self.utils: return 0
         return sum(self.utils) / len(self.utils)
 
@@ -75,6 +76,9 @@ H, W         = 1024, 1024
 # -----------------------
 def load_coco_prompts(json_path, num_samples):
     print("[*] Loading COCO prompts...")
+    if not os.path.exists(json_path):
+        print(f"[!] 에러: {json_path} 경로를 찾을 수 없습니다. 테스트용 더미 데이터를 사용합니다.")
+        return ["a photo of a cat"] * num_samples
     with open(json_path, 'r') as f:
         data = json.load(f)
     captions = list(set([ann['caption'] for ann in data['annotations']]))
@@ -93,12 +97,18 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     use_safetensors=True
 ).to(device)
 
+# --- [수정 포인트] 타입 에러 해결: VAE만 FP32로 강제 변환 ---
+# SDXL의 VAE는 FP16에서 수치적으로 불안정하며, 타입 충돌(Half vs Float)이 잦습니다.
+pipe.vae.to(dtype=torch.float32)
+# -------------------------------------------------------
+
 pipe.enable_attention_slicing()
 
 try:
+    import xformers
     pipe.enable_xformers_memory_efficient_attention()
     print("[*] xformers ON")
-except:
+except ImportError:
     print("[!] xformers 없음")
 
 pipe.set_progress_bar_config(disable=True)
@@ -108,7 +118,8 @@ pipe.set_progress_bar_config(disable=True)
 # -----------------------
 print("[*] Warm-up 중...")
 with torch.inference_mode():
-    _ = pipe(prompt_pool[:2], num_inference_steps=20, height=H, width=W)
+    # Warm-up 시에도 VAE 정밀도 대응
+    _ = pipe(prompt_pool[:2], num_inference_steps=10, height=H, width=W)
 torch.cuda.synchronize()
 print("[*] Warm-up 완료! 실험 시작합니다.\n")
 
@@ -186,17 +197,17 @@ for run in range(1, num_runs + 1):
                                     throughput, peak_mem, gpu_util])
 
             except RuntimeError as e:
+                monitor.stop()
                 if "out of memory" in str(e).lower():
                     print(f"{run:<4} | {B:<6} | {T:<6} | OOM")
-                    monitor.stop()
                     with open(csv_output_file, 'a', newline='') as f:
                         writer = csv.writer(f)
                         writer.writerow([run, B, T, "OOM", "OOM", "OOM", "OOM", "OOM"])
                     torch.cuda.empty_cache()
                     gc.collect()
+                    # 해당 스텝에서 OOM나면 다음 Batch 사이즈는 더 크므로 skip하고 다음 step_size로 진행
                     break
                 else:
-                    monitor.stop()
                     raise e
 
 print(f"\n[✔] 완료 → {os.path.abspath(csv_output_file)}")
