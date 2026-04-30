@@ -66,7 +66,7 @@ coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014
 csv_output_file = "SDXL_scaling.csv"
 
 total_images = 300
-batch_sizes  = list(range(2, 20, 2))
+batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
 step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 num_runs     = 1
 H, W         = 1024, 1024
