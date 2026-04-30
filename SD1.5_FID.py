@@ -5,6 +5,7 @@ import random
 import csv
 import os
 import gc
+import shutil
 import numpy as np
 
 from diffusers import StableDiffusionPipeline, DDIMScheduler
@@ -98,58 +99,70 @@ for T in step_sizes:
     for B in batch_sizes:
         print(f"\n[TEST] Steps={T}, Batch={B}")
 
-        # 저장 폴더
         save_dir = os.path.join(generated_root, f"T{T}_B{B}")
         os.makedirs(save_dir, exist_ok=True)
 
-        # 이미 생성된 이미지 있으면 스킵
-        existing = len([f for f in os.listdir(save_dir) if f.endswith('.png')])
-        if existing >= total_images:
-            print(f"  → 이미 생성됨 ({existing}장) 스킵")
-        else:
-            torch.cuda.empty_cache()
-            gc.collect()
+        try:
+            # 이미 생성된 이미지 있으면 스킵
+            existing = len([f for f in os.listdir(save_dir) if f.endswith('.png')])
+            if existing >= total_images:
+                print(f"  → 이미 생성됨 ({existing}장) 스킵")
+            else:
+                torch.cuda.empty_cache()
+                gc.collect()
 
-            # 이미지 생성 + 저장
-            with torch.inference_mode():
-                for i in range(0, total_images, B):
-                    batch_prompts = prompt_pool[i:i+B]
-                    if not batch_prompts:
-                        break
+                # 이미지 생성 + 저장
+                with torch.inference_mode():
+                    for i in range(0, total_images, B):
+                        batch_prompts = prompt_pool[i:i+B]
+                        if not batch_prompts:
+                            break
 
-                    generator = torch.Generator(device="cuda").manual_seed(SEED + i)
-                    images = pipe(
-                        batch_prompts,
-                        num_inference_steps=T,
-                        height=H, width=W,
-                        generator=generator
-                    ).images
+                        generator = torch.Generator(device="cuda").manual_seed(SEED + i)
+                        images = pipe(
+                            batch_prompts,
+                            num_inference_steps=T,
+                            height=H, width=W,
+                            generator=generator
+                        ).images
 
-                    for j, img in enumerate(images):
-                        img.save(f"{save_dir}/{i+j:05d}.png")
+                        for j, img in enumerate(images):
+                            img.save(f"{save_dir}/{i+j:05d}.png")
 
-            print(f"  → {total_images}장 생성 완료")
+                print(f"  → {total_images}장 생성 완료")
 
-        # FID 계산 (torch-fidelity)
-        print(f"  → FID 계산 중...")
-        metrics = torch_fidelity.calculate_metrics(
-            input1=real_images_path,
-            input2=save_dir,
-            cuda=True,
-            fid=True,
-            verbose=False
-        )
-        fid = metrics['frechet_inception_distance']
+            # FID 계산
+            print(f"  → FID 계산 중...")
+            metrics = torch_fidelity.calculate_metrics(
+                input1=real_images_path,
+                input2=save_dir,
+                cuda=True,
+                fid=True,
+                verbose=False
+            )
+            fid = metrics['frechet_inception_distance']
 
-        print(f"{B:<8} | {T:<8} | {fid:<10.2f}")
+            print(f"{B:<8} | {T:<8} | {fid:<10.2f}")
 
-        with open(csv_output_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([B, T, fid])
+            with open(csv_output_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([B, T, fid])
 
-        # 디스크 절약: FID 계산 후 이미지 삭제
-        import shutil
-        shutil.rmtree(save_dir)
-        print(f"  → 이미지 삭제 완료")
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print(f"  → OOM! B={B}, T={T} 스킵")
+                torch.cuda.empty_cache()
+                gc.collect()
+                with open(csv_output_file, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([B, T, "OOM"])
+            else:
+                raise e
+
+        finally:
+            # 항상 이미지 삭제 (OOM 나도 삭제)
+            if os.path.exists(save_dir):
+                shutil.rmtree(save_dir)
+                print(f"  → 이미지 삭제 완료")
 
 print(f"\n[✔] 완료 → {os.path.abspath(csv_output_file)}")
