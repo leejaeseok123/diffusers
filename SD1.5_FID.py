@@ -142,6 +142,7 @@ for T in step_sizes:
                 fid=True,
                 verbose=False,
                 save_cpu_ram=True # 메모리 절약
+                samples_resize=299
             )
             fid = metrics['frechet_inception_distance']
 
