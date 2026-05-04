@@ -1,84 +1,106 @@
 import sys
 import torch
+import time
 import json
 import random
 import csv
 import os
 import gc
-import shutil
+import threading
 import numpy as np
 
-from diffusers import StableDiffusionPipeline, DDIMScheduler
-import torch_fidelity
+from diffusers import StableDiffusionXLPipeline
+from pynvml import *
 
 sys.stdout.reconfigure(line_buffering=True)
 
 # -----------------------
-# 설정
+# 재현성 고정
 # -----------------------
 SEED = 42
-device = "cuda"
-
-total_images = 10000
-batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
-step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
-
-H, W = 512, 512
-
-coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-real_images_path     = "/home/jslee/diffusion_exper/batch_exper/fid/real_10k_512"
-generated_root       = "/home/jslee/diffusion_exper/batch_exper/fid/generated"
-csv_output_file      = "/home/jslee/diffusion_exper/batch_exper/fid/results/fid_results.csv"
-
-# -----------------------
-# Seed 고정
-# -----------------------
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 
 # -----------------------
-# COCO prompt 로드
+# GPU 모니터링
 # -----------------------
-def load_coco_prompts(path, n):
+nvmlInit()
+handle = nvmlDeviceGetHandleByIndex(0)
+
+class GPUUtilMonitor:
+    def __init__(self, handle):
+        self.handle = handle
+        self.utils = []
+        self.stopped = False
+
+    def start(self):
+        self.utils = []
+        self.stopped = False
+        self.thread = threading.Thread(target=self._monitor)
+        self.thread.start()
+
+    def _monitor(self):
+        while not self.stopped:
+            try:
+                util = nvmlDeviceGetUtilizationRates(self.handle)
+                self.utils.append(util.gpu)
+            except: pass
+            time.sleep(0.01)
+
+    def stop(self):
+        self.stopped = True
+        if hasattr(self, 'thread'):
+            self.thread.join()
+        if not self.utils: return 0
+        return sum(self.utils) / len(self.utils)
+
+monitor = GPUUtilMonitor(handle)
+
+# -----------------------
+# 실험 설정
+# -----------------------
+device = "cuda"
+coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
+csv_output_file = "SDXL_scaling.csv"
+
+total_images = 300
+batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
+step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
+num_runs     = 1
+H, W         = 1024, 1024
+
+# -----------------------
+# 데이터 로드
+# -----------------------
+def load_coco_prompts(json_path, num_samples):
     print("[*] Loading COCO prompts...")
-    with open(path, 'r') as f:
+    if not os.path.exists(json_path):
+        print(f"[!] 에러: {json_path} 경로를 찾을 수 없습니다.")
+        return ["a photo of a cat"] * num_samples
+    with open(json_path, 'r') as f:
         data = json.load(f)
     captions = list(set([ann['caption'] for ann in data['annotations']]))
     captions = sorted(captions)
-    return captions[:n]
+    return captions[:num_samples]
 
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# real_10k_512 폴더 없으면 자동 생성
+# 모델 로드 (SDXL 1024x1024)
 # -----------------------
-if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < 10000:
-    print("[*] real_10k_512 생성 중 (512x512 resize)...")
-    from PIL import Image
-    src = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/val2014/real_10k"
-    os.makedirs(real_images_path, exist_ok=True)
-    files = sorted(os.listdir(src))[:10000]
-    for i, f in enumerate(files):
-        img = Image.open(os.path.join(src, f)).convert('RGB')
-        img = img.resize((512, 512))
-        img.save(os.path.join(real_images_path, f))
-        if i % 1000 == 0:
-            print(f"  → {i}/10000 완료")
-    print("[*] real_10k_512 생성 완료!\n")
-
-# -----------------------
-# 모델 로드
-# -----------------------
-print("[*] Loading SD v1.5...")
-pipe = StableDiffusionPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5",
+print("[*] Loading SDXL 1.0 (1024x1024)...")
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
     torch_dtype=torch.float16,
-    safety_checker=None
+    use_safetensors=True,
+    variant="fp16"
 ).to(device)
 
-pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+# VAE float32로 변환 (타입 충돌 방지)
+pipe.vae = pipe.vae.to(dtype=torch.float32)
+
 pipe.enable_attention_slicing()
 
 try:
@@ -95,100 +117,94 @@ pipe.set_progress_bar_config(disable=True)
 # -----------------------
 print("[*] Warm-up 중...")
 with torch.inference_mode():
-    _ = pipe(prompt_pool[:2], num_inference_steps=5, height=H, width=W)
+    _ = pipe(prompt_pool[:2], num_inference_steps=10, height=H, width=W)
 torch.cuda.synchronize()
-print("[*] Warm-up 완료!\n")
+print("[*] Warm-up 완료! 실험 시작합니다.\n")
 
 # -----------------------
 # CSV 초기화
 # -----------------------
-os.makedirs(os.path.dirname(csv_output_file), exist_ok=True)
 with open(csv_output_file, 'w', newline='') as f:
     writer = csv.writer(f)
-    writer.writerow(["Batch", "Steps", "FID"])
+    writer.writerow([
+        "Run", "Batch", "Steps",
+        "System_Latency_s",
+        "User_Latency_s",
+        "Throughput_img_s",
+        "Peak_Mem_GB",
+        "GPU_Util_%"
+    ])
 
-print(f"{'Batch':<8} | {'Steps':<8} | {'FID':<10}")
-print("-" * 35)
+print(f"{'Run':<4} | {'Batch':<6} | {'Steps':<6} | {'SystemLat':<11} | {'UserLat':<9} | {'Throughput':<12} | {'PeakMem':<9} | {'GPU%':<6}")
+print("-" * 95)
 
 # -----------------------
-# 실험 루프
+# 메인 실험 루프
 # -----------------------
-for T in step_sizes:
-    for B in batch_sizes:
-        print(f"\n[TEST] Steps={T}, Batch={B}")
-
-        save_dir = os.path.join(generated_root, f"T{T}_B{B}")
-        os.makedirs(save_dir, exist_ok=True)
-
-        try:
-            # 1. 이미지 생성
-            existing = len([f for f in os.listdir(save_dir) if f.endswith('.png')])
-            if existing >= total_images:
-                print(f"  → 이미 생성됨 ({existing}장) 스킵")
-            else:
+for run in range(1, num_runs + 1):
+    for T in step_sizes:
+        for B in batch_sizes:
+            try:
                 torch.cuda.empty_cache()
                 gc.collect()
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.synchronize()
+
+                # -----------------------------------------------
+                # 1. System Latency + Throughput (전체 처리)
+                # -----------------------------------------------
+                monitor.start()
+                start = time.time()
 
                 with torch.inference_mode():
                     for i in range(0, total_images, B):
                         batch_prompts = prompt_pool[i:i+B]
-                        if not batch_prompts:
-                            break
+                        if not batch_prompts: break
+                        generator = torch.Generator(device="cuda").manual_seed(SEED)
+                        _ = pipe(batch_prompts, num_inference_steps=T,
+                                height=H, width=W, generator=generator).images
 
-                        generator = torch.Generator(device="cuda").manual_seed(SEED + i)
-                        output = pipe(
-                            batch_prompts,
-                            num_inference_steps=T,
-                            height=H, width=W,
-                            generator=generator
-                        )
+                torch.cuda.synchronize()
+                end = time.time()
+                gpu_util = monitor.stop()
 
-                        for j, img in enumerate(output.images):
-                            img.save(os.path.join(save_dir, f"{i+j:05d}.png"))
+                total_time     = end - start
+                system_latency = total_time / total_images
+                throughput     = total_images / total_time
+                peak_mem       = torch.cuda.max_memory_allocated() / 1024**3
 
-                print(f"  → {total_images}장 생성 완료")
+                # -----------------------------------------------
+                # 2. User Latency (배치 1번 처리)
+                # -----------------------------------------------
+                torch.cuda.synchronize()
+                u_start = time.time()
 
-            # 2. FID 계산
-            print(f"  → FID 계산 중...")
-            metrics = torch_fidelity.calculate_metrics(
-                input1=real_images_path,
-                input2=os.path.abspath(save_dir),
-                cuda=True,
-                fid=True,
-                verbose=False,
-                save_cpu_ram=True
-            )
-            fid = metrics['frechet_inception_distance']
+                with torch.inference_mode():
+                    generator = torch.Generator(device="cuda").manual_seed(SEED)
+                    _ = pipe(prompt_pool[:B], num_inference_steps=T,
+                            height=H, width=W, generator=generator).images
 
-            print(f"{B:<8} | {T:<8} | {fid:<10.2f}")
-            with open(csv_output_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([B, T, fid])
+                torch.cuda.synchronize()
+                user_latency = time.time() - u_start
 
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                print(f"  → OOM! B={B}, T={T} 스킵")
-                torch.cuda.empty_cache()
-                gc.collect()
+                print(f"{run:<4} | {B:<6} | {T:<6} | {system_latency:<11.4f} | {user_latency:<9.4f} | {throughput:<12.2f} | {peak_mem:<9.2f} | {gpu_util:<6.1f}")
+
                 with open(csv_output_file, 'a', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow([B, T, "OOM"])
-            else:
-                print(f"  → 런타임 에러: {e}")
-                with open(csv_output_file, 'a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([B, T, f"ERROR"])
+                    writer.writerow([run, B, T, system_latency, user_latency,
+                                    throughput, peak_mem, gpu_util])
 
-        except Exception as e:
-            print(f"  → 예상치 못한 에러: {e}")
-            with open(csv_output_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([B, T, f"ERROR"])
+            except RuntimeError as e:
+                monitor.stop()
+                if "out of memory" in str(e).lower():
+                    print(f"{run:<4} | {B:<6} | {T:<6} | OOM")
+                    with open(csv_output_file, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([run, B, T, "OOM", "OOM", "OOM", "OOM", "OOM"])
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    break
+                else:
+                    raise e
 
-        finally:
-            if os.path.exists(save_dir):
-                shutil.rmtree(save_dir)
-                print(f"  → 이미지 삭제 완료")
-            torch.cuda.empty_cache()
-
-print(f"\n[✔] 실험 완료 → {os.path.abspath(csv_output_file)}")
+print(f"\n[✔] 완료 → {os.path.abspath(csv_output_file)}")
