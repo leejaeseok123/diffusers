@@ -20,15 +20,13 @@ SEED = 42
 device = "cuda"
 
 total_images = 10000
-# 실험할 배치 사이즈와 스텝 수
 batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
 step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
 H, W = 512, 512
 
-# 경로 설정 (끝에 /를 붙여 디렉토리임을 명시)
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-real_images_path     = os.path.abspath("/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/val2014/real_10k") + "/"
+real_images_path     = "/home/jslee/diffusion_exper/batch_exper/fid/real_10k_512"
 generated_root       = "/home/jslee/diffusion_exper/batch_exper/fid/generated"
 csv_output_file      = "/home/jslee/diffusion_exper/batch_exper/fid/results/fid_results.csv"
 
@@ -54,6 +52,23 @@ def load_coco_prompts(path, n):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
+# real_10k_512 폴더 없으면 자동 생성
+# -----------------------
+if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < 10000:
+    print("[*] real_10k_512 생성 중 (512x512 resize)...")
+    from PIL import Image
+    src = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/val2014/real_10k"
+    os.makedirs(real_images_path, exist_ok=True)
+    files = sorted(os.listdir(src))[:10000]
+    for i, f in enumerate(files):
+        img = Image.open(os.path.join(src, f)).convert('RGB')
+        img = img.resize((512, 512))
+        img.save(os.path.join(real_images_path, f))
+        if i % 1000 == 0:
+            print(f"  → {i}/10000 완료")
+    print("[*] real_10k_512 생성 완료!\n")
+
+# -----------------------
 # 모델 로드
 # -----------------------
 print("[*] Loading SD v1.5...")
@@ -76,7 +91,7 @@ except ImportError:
 pipe.set_progress_bar_config(disable=True)
 
 # -----------------------
-# Warm-up (GPU 엔진 가동)
+# Warm-up
 # -----------------------
 print("[*] Warm-up 중...")
 with torch.inference_mode():
@@ -104,10 +119,9 @@ for T in step_sizes:
 
         save_dir = os.path.join(generated_root, f"T{T}_B{B}")
         os.makedirs(save_dir, exist_ok=True)
-        abs_save_dir = os.path.abspath(save_dir) + "/"
 
         try:
-            # 1. 이미지 생성 단계
+            # 1. 이미지 생성
             existing = len([f for f in os.listdir(save_dir) if f.endswith('.png')])
             if existing >= total_images:
                 print(f"  → 이미 생성됨 ({existing}장) 스킵")
@@ -118,7 +132,8 @@ for T in step_sizes:
                 with torch.inference_mode():
                     for i in range(0, total_images, B):
                         batch_prompts = prompt_pool[i:i+B]
-                        if not batch_prompts: break
+                        if not batch_prompts:
+                            break
 
                         generator = torch.Generator(device="cuda").manual_seed(SEED + i)
                         output = pipe(
@@ -127,22 +142,21 @@ for T in step_sizes:
                             height=H, width=W,
                             generator=generator
                         )
-                        
+
                         for j, img in enumerate(output.images):
                             img.save(os.path.join(save_dir, f"{i+j:05d}.png"))
 
                 print(f"  → {total_images}장 생성 완료")
 
-            # 2. FID 계산 단계
+            # 2. FID 계산
             print(f"  → FID 계산 중...")
             metrics = torch_fidelity.calculate_metrics(
                 input1=real_images_path,
-                input2=abs_save_dir,
+                input2=os.path.abspath(save_dir),
                 cuda=True,
                 fid=True,
                 verbose=False,
-                save_cpu_ram=True,
-                samples_resize=299
+                save_cpu_ram=True
             )
             fid = metrics['frechet_inception_distance']
 
@@ -153,7 +167,7 @@ for T in step_sizes:
 
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                print(f"  → OOM 발생! B={B}, T={T} 스킵")
+                print(f"  → OOM! B={B}, T={T} 스킵")
                 torch.cuda.empty_cache()
                 gc.collect()
                 with open(csv_output_file, 'a', newline='') as f:
@@ -161,16 +175,17 @@ for T in step_sizes:
                     writer.writerow([B, T, "OOM"])
             else:
                 print(f"  → 런타임 에러: {e}")
-                continue # 다음 배치로 진행
-        
+                with open(csv_output_file, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([B, T, f"ERROR"])
+
         except Exception as e:
             print(f"  → 예상치 못한 에러: {e}")
             with open(csv_output_file, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([B, T, f"ERROR: {type(e).__name__}"])
+                writer.writerow([B, T, f"ERROR"])
 
         finally:
-            # 다음 실험을 위해 이미지 삭제 및 메모리 정리
             if os.path.exists(save_dir):
                 shutil.rmtree(save_dir)
                 print(f"  → 이미지 삭제 완료")
