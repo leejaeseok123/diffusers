@@ -62,7 +62,7 @@ monitor = GPUUtilMonitor(handle)
 # -----------------------
 device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "SD_v1.5_scaling.csv"
+csv_output_file = "SD_v1.5_DPM_scaling.csv"
 
 total_images = 300
 batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96]
