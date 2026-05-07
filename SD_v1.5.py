@@ -62,7 +62,7 @@ monitor = GPUUtilMonitor(handle)
 # -----------------------
 device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "SD1.5.csv"
+csv_output_file = "SD_v1.5_scaling.csv"
 
 total_images = 300
 batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
@@ -96,11 +96,11 @@ pipe = StableDiffusionPipeline.from_pretrained(
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
 pipe.enable_attention_slicing()
 
-try:
-    pipe.enable_xformers_memory_efficient_attention()
-    print("[*] xformers ON")
-except:
-    print("[!] xformers 없음")
+ #try:
+ #   pipe.enable_xformers_memory_efficient_attention()
+ #   print("[*] xformers ON")
+#except:
+  #  print("[!] xformers 없음")
 
 pipe.set_progress_bar_config(disable=True)
 
