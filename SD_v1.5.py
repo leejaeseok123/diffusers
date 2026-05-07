@@ -62,7 +62,7 @@ monitor = GPUUtilMonitor(handle)
 # -----------------------
 device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "SD_v1.5_scaling.csv"
+csv_output_file = "SD1.5.csv"
 
 total_images = 300
 batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
@@ -143,7 +143,7 @@ for run in range(1, num_runs + 1):
                 torch.cuda.synchronize()
 
                 # -----------------------------------------------
-                # 1. System Latency + Throughput (전체 처리)
+                # 1. System Latency (전체 처리)
                 # -----------------------------------------------
                 monitor.start()
                 start = time.time()
@@ -160,13 +160,13 @@ for run in range(1, num_runs + 1):
                 end = time.time()
                 gpu_util = monitor.stop()
 
-                total_time      = end - start
-                system_latency  = total_time / total_images
-                throughput      = total_images / total_time
-                peak_mem        = torch.cuda.max_memory_allocated() / 1024**3
+                total_time     = end - start
+                system_latency = total_time / total_images
+                peak_mem       = torch.cuda.max_memory_allocated() / 1024**3
 
                 # -----------------------------------------------
-                # 2. User Latency (배치 1번 처리 = 사용자 대기시간)
+                # 2. User Latency + Throughput (배치 1번 처리)
+                # throughput = B / 배치 1번 처리 시간
                 # -----------------------------------------------
                 torch.cuda.synchronize()
                 u_start = time.time()
@@ -178,6 +178,7 @@ for run in range(1, num_runs + 1):
 
                 torch.cuda.synchronize()
                 user_latency = time.time() - u_start
+                throughput   = B / user_latency
 
                 print(f"{run:<4} | {B:<6} | {T:<6} | {system_latency:<11.4f} | {user_latency:<9.4f} | {throughput:<12.2f} | {peak_mem:<9.2f} | {gpu_util:<6.1f}")
 
