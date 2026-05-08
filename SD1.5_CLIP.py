@@ -20,7 +20,7 @@ SEED = 42
 device = "cuda"
 
 total_images = 1000
-batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
+batch_sizes  = [4]
 step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
 H, W = 512, 512
