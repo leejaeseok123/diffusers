@@ -6,7 +6,6 @@ import csv
 import os
 import gc
 import numpy as np
-from PIL import Image
 
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 from transformers import CLIPProcessor, CLIPModel
@@ -20,13 +19,13 @@ SEED = 42
 device = "cuda"
 
 total_images = 1000
-batch_sizes  = [4]
+batch_size   = 20  # 고정 배치 (1000/20 = 50번 반복)
 step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
 H, W = 512, 512
 
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file      = "/home/jslee/diffusion_exper/batch_exper/fid/results/clip_results.csv"
+csv_output_file      = "/home/jslee/diffusion_exper/batch_exper/fid/results/SD1.5_clip_results.csv"
 
 # -----------------------
 # Seed 고정
@@ -52,7 +51,7 @@ prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 # -----------------------
 # SD 모델 로드
 # -----------------------
-print("[*] Loading SD v1.5...")
+print("[*] Loading SD v1.5 (512x512)...")
 pipe = StableDiffusionPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
     torch_dtype=torch.float16,
@@ -93,16 +92,14 @@ def calc_clip_score(images, prompts):
     ).to(device)
 
     with torch.no_grad():
-        outputs     = clip_model(**inputs)
-        img_embeds  = outputs.image_embeds  # (B, 512)
-        txt_embeds  = outputs.text_embeds   # (B, 512)
+        outputs    = clip_model(**inputs)
+        img_embeds = outputs.image_embeds
+        txt_embeds = outputs.text_embeds
 
-        # 정규화
         img_embeds = img_embeds / img_embeds.norm(dim=-1, keepdim=True)
         txt_embeds = txt_embeds / txt_embeds.norm(dim=-1, keepdim=True)
 
-        # 코사인 유사도
-        scores = (img_embeds * txt_embeds).sum(dim=-1)  # (B,)
+        scores = (img_embeds * txt_embeds).sum(dim=-1)
 
     return scores.cpu().float().tolist()
 
@@ -121,65 +118,62 @@ print("[*] Warm-up 완료!\n")
 os.makedirs(os.path.dirname(csv_output_file), exist_ok=True)
 with open(csv_output_file, 'w', newline='') as f:
     writer = csv.writer(f)
-    writer.writerow(["Batch", "Steps", "CLIP_Score"])
+    writer.writerow(["Steps", "CLIP_Score"])
 
-print(f"{'Batch':<8} | {'Steps':<8} | {'CLIP_Score':<12}")
-print("-" * 38)
+print(f"{'Steps':<8} | {'CLIP_Score':<12}")
+print("-" * 25)
 
 # -----------------------
-# 실험 루프
+# 실험 루프 (step만 반복)
 # -----------------------
 for T in step_sizes:
-    for B in batch_sizes:
-        print(f"\n[TEST] Steps={T}, Batch={B}")
+    print(f"\n[TEST] Steps={T}, Batch={batch_size}(고정)")
 
-        try:
+    try:
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        all_scores = []
+
+        with torch.inference_mode():
+            for i in range(0, total_images, batch_size):
+                batch_prompts = prompt_pool[i:i+batch_size]
+                if not batch_prompts:
+                    break
+
+                generator = torch.Generator(device="cuda").manual_seed(SEED + i)
+                images = pipe(
+                    batch_prompts,
+                    num_inference_steps=T,
+                    height=H, width=W,
+                    generator=generator
+                ).images
+
+                scores = calc_clip_score(images, batch_prompts)
+                all_scores.extend(scores)
+
+        clip_score = float(np.mean(all_scores))
+
+        print(f"{T:<8} | {clip_score:<12.4f}")
+        with open(csv_output_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([T, clip_score])
+
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            print(f"  → OOM! T={T} 스킵")
             torch.cuda.empty_cache()
             gc.collect()
-
-            all_scores = []
-
-            with torch.inference_mode():
-                for i in range(0, total_images, B):
-                    batch_prompts = prompt_pool[i:i+B]
-                    if not batch_prompts:
-                        break
-
-                    generator = torch.Generator(device="cuda").manual_seed(SEED + i)
-                    images = pipe(
-                        batch_prompts,
-                        num_inference_steps=T,
-                        height=H, width=W,
-                        generator=generator
-                    ).images
-
-                    # CLIP Score 계산 (이미지 저장 없이 바로)
-                    scores = calc_clip_score(images, batch_prompts)
-                    all_scores.extend(scores)
-
-            clip_score = float(np.mean(all_scores))
-
-            print(f"{B:<8} | {T:<8} | {clip_score:<12.4f}")
             with open(csv_output_file, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([B, T, clip_score])
+                writer.writerow([T, "OOM"])
+        else:
+            print(f"  → 에러: {e}")
+            with open(csv_output_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([T, "ERROR"])
 
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                print(f"  → OOM! B={B}, T={T} 스킵")
-                torch.cuda.empty_cache()
-                gc.collect()
-                with open(csv_output_file, 'a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([B, T, "OOM"])
-                break
-            else:
-                print(f"  → 에러: {e}")
-                with open(csv_output_file, 'a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([B, T, "ERROR"])
-
-        finally:
-            torch.cuda.empty_cache()
+    finally:
+        torch.cuda.empty_cache()
 
 print(f"\n[✔] 완료 → {os.path.abspath(csv_output_file)}")
