@@ -20,7 +20,7 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "v1.5"
 MODEL_ID = "runwayml/stable-diffusion-v1-5"
 H, W = 512, 512  # SD v1.5 표준 해상도
-FIXED_BATCH_SIZE = 100  # RTX 6000 Ada 기준 100 가능 (메모리 부족 시 64로 조절)
+FIXED_BATCH_SIZE = 50  
 TOTAL_IMAGES = 10000
 SEED = 42
 
