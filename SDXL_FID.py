@@ -79,13 +79,8 @@ pipe.vae = pipe.vae.to(dtype=torch.float32)
 # DDIM 스케줄러 적용
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
 
+# xformers 제거 → PyTorch 내장 attention 사용
 pipe.enable_attention_slicing()
-try:
-    import xformers
-    pipe.enable_xformers_memory_efficient_attention()
-    print("[*] xformers ON")
-except ImportError:
-    print("[!] xformers 없음")
 
 pipe.set_progress_bar_config(disable=True)
 prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES)
@@ -146,12 +141,31 @@ for T in step_sizes:
             writer = csv.writer(f)
             writer.writerow([T, fid, FIXED_BATCH_SIZE, f"{H}x{W}"])
 
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            print(f"\n[!] OOM at T={T} 스킵")
+            torch.cuda.empty_cache()
+            gc.collect()
+            with open(csv_output_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([T, "OOM", FIXED_BATCH_SIZE, f"{H}x{W}"])
+        else:
+            print(f"\n[!] Error at T={T}: {e}")
+            with open(csv_output_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([T, "ERROR", FIXED_BATCH_SIZE, f"{H}x{W}"])
+
     except Exception as e:
         print(f"\n[!] Error at T={T}: {e}")
+        with open(csv_output_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([T, "ERROR", FIXED_BATCH_SIZE, f"{H}x{W}"])
 
     finally:
         if os.path.exists(save_dir):
             shutil.rmtree(save_dir)
+        torch.cuda.empty_cache()
+        gc.collect()
 
 print(f"\n[✔] {VERSION} FID 실험 완료!")
 print(f"[*] 결과: {csv_output_file}")
