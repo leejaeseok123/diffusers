@@ -19,7 +19,7 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "SDXL_Base"
 MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 H, W = 1024, 1024
-FIXED_BATCH_SIZE = 10
+FIXED_BATCH_SIZE = 5
 TOTAL_IMAGES = 10000
 SEED = 42
 
