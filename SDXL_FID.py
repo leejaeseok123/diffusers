@@ -19,7 +19,7 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "SDXL_Base"
 MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 H, W = 1024, 1024
-FIXED_BATCH_SIZE = 5
+FIXED_BATCH_SIZE = 8  # 
 TOTAL_IMAGES = 10000
 SEED = 42
 
@@ -63,13 +63,13 @@ if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < T
     print(f"[*] Real 데이터셋 준비 완료!\n")
 
 # -----------------------
-# 모델 로드 (float32로 통일 - 타입 충돌 완전 방지)
+# 모델 로드 (float16 최적화)
 # -----------------------
 print(f"[*] Loading {MODEL_ID}...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.float32,  # float16 → float32
-    use_safetensors=True         # variant="fp16" 제거
+    torch_dtype=torch.float16,  # ⚡ [최적화] float32 → float16 변경 (VRAM 절반 감소, 속도 극대화)
+    use_safetensors=True
 ).to("cuda")
 
 # DDIM 스케줄러 적용
@@ -107,12 +107,15 @@ for T in step_sizes:
                 if not batch_prompts: break
 
                 generator = torch.Generator(device="cuda").manual_seed(SEED + i)
-                output = pipe(
-                    prompt=batch_prompts,
-                    num_inference_steps=T,
-                    height=H, width=W,
-                    generator=generator
-                )
+                
+                # ⚡ [최적화] 안전하고 정확한 FP16 추론을 위해 autocast 적용
+                with torch.autocast("cuda"):
+                    output = pipe(
+                        prompt=batch_prompts,
+                        num_inference_steps=T,
+                        height=H, width=W,
+                        generator=generator
+                    )
 
                 for j, img in enumerate(output.images):
                     img.save(os.path.join(save_dir, f"{i+j:05d}.png"))
