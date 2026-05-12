@@ -63,25 +63,18 @@ if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < T
     print(f"[*] Real 데이터셋 준비 완료!\n")
 
 # -----------------------
-# 모델 로드
+# 모델 로드 (float32로 통일 - 타입 충돌 완전 방지)
 # -----------------------
 print(f"[*] Loading {MODEL_ID}...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.float16,
-    variant="fp16",
-    use_safetensors=True
+    torch_dtype=torch.float32,  # float16 → float32
+    use_safetensors=True         # variant="fp16" 제거
 ).to("cuda")
-
-# VAE float32로 변환 (타입 충돌 방지)
-pipe.vae = pipe.vae.to(dtype=torch.float32)
 
 # DDIM 스케줄러 적용
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-
-# xformers 제거 → PyTorch 내장 attention 사용
 pipe.enable_attention_slicing()
-
 pipe.set_progress_bar_config(disable=True)
 prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES)
 
