@@ -1,4 +1,3 @@
-```python
 import sys
 import torch
 import time
