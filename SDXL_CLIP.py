@@ -47,15 +47,18 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     variant="fp16"
 ).to(device)
 
-pipe.vae = pipe.vae.to(dtype=torch.float32)
 pipe.enable_attention_slicing()
 
+# xformers 먼저 적용 후 VAE float32 변환
 try:
     import xformers
     pipe.enable_xformers_memory_efficient_attention()
     print("[*] xformers ON")
 except ImportError:
     print("[!] xformers 없음")
+
+# xformers 적용 후에 VAE float32로 변환 (충돌 방지)
+pipe.vae = pipe.vae.to(dtype=torch.float32)
 
 pipe.set_progress_bar_config(disable=True)
 
