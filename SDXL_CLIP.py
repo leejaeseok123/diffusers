@@ -20,7 +20,7 @@ SEED = 42
 device = "cuda"
 
 total_images = 1000
-batch_size   = 16  # SDXL+CLIP 동시 구동 시 48GB VRAM 기준 16이 안정적입니다. (20에서 16으로 조정)
+batch_size   = 16  # VRAM 상황에 따라 8~16 권장
 step_sizes   = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 H, W = 1024, 1024
 
@@ -40,7 +40,7 @@ def load_coco_prompts(path, n):
     print("[*] Loading COCO prompts...")
     if not os.path.exists(path):
         print(f"[!] 경로 없음: {path}. 기본 프롬프트를 사용합니다.")
-        return ["a professional photograph of a beautiful landscape"] * n
+        return ["a high quality professional photo"] * n
     with open(path, 'r') as f:
         data = json.load(f)
     captions = sorted(list(set([ann['caption'] for ann in data['annotations']])))
@@ -49,7 +49,7 @@ def load_coco_prompts(path, n):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# 3. 모델 로드 (SDXL Official Optimization)
+# 3. 모델 로드 (Official SDXL Optimization)
 # -----------------------
 print(f"[*] Loading SDXL 1.0 ({H}x{W})...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
@@ -59,10 +59,12 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     variant="fp16"
 ).to(device)
 
-# [공식 권장] VAE 정밀도 및 메모리 최적화
-pipe.vae.to(dtype=torch.float32) # 타입 에러 방지 핵심
-pipe.enable_vae_slicing()
-pipe.enable_vae_tiling()
+# [에러 해결] VAE는 fp32로 강제하여 타입 충돌 및 수치 불안정성 방지
+pipe.vae.to(dtype=torch.float32)
+
+# [최신 API 반영] 경고 메시지 해결을 위해 pipe.vae에서 직접 호출
+pipe.vae.enable_slicing()
+pipe.vae.enable_tiling()
 
 try:
     import xformers
@@ -85,7 +87,6 @@ print("[*] CLIP 로드 완료!\n")
 
 # CLIP Score 계산 함수
 def calc_clip_score(images, prompts):
-    # CLIP 연산을 위해 CPU로 가져온 후 processor 처리
     inputs = clip_processor(
         text=prompts, images=images,
         return_tensors="pt", padding=True, truncation=True
@@ -93,16 +94,16 @@ def calc_clip_score(images, prompts):
     
     with torch.no_grad():
         outputs    = clip_model(**inputs)
-        # 정규화하여 코사인 유사도 계산
+        # 정규화 및 코사인 유사도 계산
         img_embeds = outputs.image_embeds / outputs.image_embeds.norm(dim=-1, keepdim=True)
         txt_embeds = outputs.text_embeds  / outputs.text_embeds.norm(dim=-1, keepdim=True)
         scores = (img_embeds * txt_embeds).sum(dim=-1)
     return scores.cpu().float().tolist()
 
-# Warm-up
-print("[*] Warm-up 중...")
+# Warm-up (에러 조기 발견을 위해 VAE 디코딩 포함)
+print("[*] Warm-up 중 (VAE Decoding 포함)...")
 with torch.inference_mode():
-    _ = pipe(prompt_pool[:2], num_inference_steps=10, height=H, width=W, output_type="latent")
+    _ = pipe(prompt_pool[:2], num_inference_steps=10, height=H, width=W).images
 torch.cuda.synchronize()
 print("[*] Warm-up 완료!\n")
 
@@ -132,8 +133,7 @@ for T in step_sizes:
                 
                 generator = torch.Generator(device="cuda").manual_seed(SEED + i)
                 
-                # 이미지 생성
-                # CLIP Score를 위해서는 output_type="latent"가 아닌 이미지가 필요함
+                # 이미지 생성 (디코딩 필수)
                 output = pipe(
                     prompt=batch_prompts, 
                     num_inference_steps=T,
@@ -143,12 +143,12 @@ for T in step_sizes:
                 )
                 images = output.images
                 
-                # CLIP Score 계산 및 누적
+                # 점수 계산
                 batch_scores = calc_clip_score(images, batch_prompts)
                 all_scores.extend(batch_scores)
                 
-                if (i + batch_size) % 100 == 0:
-                    print(f"  → Progress: {i + batch_size}/{total_images} images done.")
+                if (i + batch_size) % 80 == 0:
+                    print(f"  → {i + batch_size}/{total_images} 완료")
 
         clip_score = float(np.mean(all_scores))
         print(f"[*] 결과 → Steps {T}: {clip_score:.4f}")
@@ -159,15 +159,15 @@ for T in step_sizes:
             
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
-            print(f"  → [!] OOM! T={T} 스킵 (VRAM 부족)")
+            print(f"  → [!] OOM! T={T} 스킵")
             with open(csv_output_file, 'a', newline='') as f:
                 csv.writer(f).writerow([T, "OOM"])
         else:
-            print(f"  → [!] 에러 발생: {e}")
+            print(f"  → [!] 에러: {e}")
             with open(csv_output_file, 'a', newline='') as f:
                 csv.writer(f).writerow([T, "ERROR"])
         
         torch.cuda.empty_cache()
         gc.collect()
 
-print(f"\n[✔] 모든 실험 완료! 결과 저장: {csv_output_file}")
+print(f"\n[✔] 완료! 저장 위치: {csv_output_file}")
