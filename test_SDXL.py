@@ -98,7 +98,7 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
 ).to(device)
 
 # VAE 타입 충돌 방지 (공식 권장)
-pipe.upcast_vae()
+pipe.vae = pipe.vae.to(dtype=torch.float32)
 
 pipe.enable_attention_slicing()
 
