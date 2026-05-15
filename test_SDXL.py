@@ -63,7 +63,7 @@ monitor = GPUUtilMonitor(handle)
 # -----------------------
 device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "SDXL_test_scaling.csv"
+csv_output_file = "SDXL_scaling.csv"
 
 total_images = 300
 batch_sizes  = [1, 2, 4, 8, 16, 32, 64, 80, 96, 128]
@@ -87,18 +87,14 @@ def load_coco_prompts(json_path, num_samples):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# 모델 로드
+# 모델 로드 (float32 - 타입 충돌 완전 방지)
 # -----------------------
-print("[*] Loading SDXL 1.0...")
+print("[*] Loading SDXL 1.0 (float32)...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
     "stabilityai/stable-diffusion-xl-base-1.0",
-    torch_dtype=torch.float16,
-    use_safetensors=True,
-    variant="fp16"
+    torch_dtype=torch.float32,
+    use_safetensors=True
 ).to(device)
-
-# VAE 타입 충돌 방지 (공식 권장)
-pipe.vae = pipe.vae.to(dtype=torch.float32)
 
 pipe.enable_attention_slicing()
 
@@ -162,7 +158,7 @@ for run in range(1, num_runs + 1):
                             num_inference_steps=T,
                             height=H, width=W,
                             generator=generator
-                        ).images  # VAE 디코딩 포함
+                        ).images
 
                 torch.cuda.synchronize()
                 end = time.time()
@@ -186,7 +182,7 @@ for run in range(1, num_runs + 1):
                         num_inference_steps=T,
                         height=H, width=W,
                         generator=generator
-                    ).images  # VAE 디코딩 포함
+                    ).images
 
                 torch.cuda.synchronize()
                 user_latency = time.time() - u_start
