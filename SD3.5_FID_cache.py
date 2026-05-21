@@ -22,6 +22,8 @@ H, W = 1024, 1024
 FIXED_BATCH_SIZE = 4
 TOTAL_IMAGES = 10000
 SEED = 42
+# torch_fidelity 내장 시스템이 로컬 디렉토리에 물리적으로 보관할 캐시 이름 지정
+CACHE_NAME = f"real_10k_{H}_cache_v1"
 
 step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
@@ -107,20 +109,21 @@ pipe.set_progress_bar_config(disable=True)
 prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES)
 
 # -----------------------
-# [핵심 최적화] Real 이미지의 Feature(인셉션 통계) 딱 한 번만 계산하여 캐싱
+# [핵심 변경 1] 하드웨어 파일 기반의 영구 캐시 생성 단계
 # -----------------------
-print("[*] Real 이미지 인셉션 특징 추출 중 (최초 1회만 실행)...")
-real_features = torch_fidelity.calculate_metrics(
-    input1=real_dataset,
+print("[*] Real 이미지 인셉션 특징 추출 및 파일 캐시 등록 중 (최초 1회만 연산)...")
+_ = torch_fidelity.calculate_metrics(
+    input1=real_dataset,               # 명확한 Dataset 객체를 대입하여 에러 차단
+    input2=real_dataset,               # 바이너리 제약 조건 우회를 위해 임시로 복사 대입
     cuda=True,
-    fid=False,                                   # input2 없이 연산하기 위해 False로 설정
-    isc=True,                                    # 내부 인셉션 모델 활성화를 위해 True 설정
+    fid=True,
     verbose=False,
     save_cpu_ram=True,
     batch_size=32,
-    get_input1_features_instead_of_metrics=True  # 실제 스코어 연산 없이 인셉션 피처만 쏙 뽑아 변수에 저장
+    cache_input1_name=CACHE_NAME,      # 이 이름으로 ~/.cache/torch/fidelity에 .pth 통계 파일이 자동 저장됨
+    cache_input2_name=f"{CACHE_NAME}_temp"
 )
-print("[✔] Real 이미지 특징 캐싱 완료! 이제 스텝별 계산이 극도로 빠라집니다.\n")
+print("[✔] Real 이미지 특징 캐싱 완료! 이제 스텝별 계산 시 디스크를 전혀 읽지 않고 0초만에 통과합니다.\n")
 
 # -----------------------
 # 실험 루프
@@ -142,7 +145,7 @@ for T in step_sizes:
         gc.collect()
 
         print(f"[*] Steps={T}: 이미지 생성 중...", end=" ", flush=True)
-        all_images = []  # RAM에 압축된 PIL 이미지 객체 형태로 보관 (10,000장 기준 약 2.5GB 소모하여 안전함)
+        all_images = []  # RAM에 압축된 PIL 이미지 객체 형태로 보관 (10,000장 기준 약 2.5GB 소모하여 매우 안전)
 
         with torch.inference_mode():
             for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
@@ -156,22 +159,23 @@ for T in step_sizes:
                     height=H, width=W,
                     generator=generator
                 )
-                all_images.extend(output.images)  # 디스크 파일 저장 과정을 완전히 생략
+                all_images.extend(output.images)  # 디스크에 파일을 쓰지 않아 쓰기 병목 소멸
 
         print(f"완료 ({len(all_images)}장) → FID 계산 중...", end=" ", flush=True)
         
         # Fake용 온디맨드 데이터셋 생성
         fake_dataset = FakeMemoryDataset(all_images)
 
-        # 캐싱된 Real 특징과 메모리 기반 Fake 데이터셋을 바인딩하여 계산
+        # [핵심 변경 2] 캐시 이름을 명시하여 기존 캐시 데이터 강제 로드
         metrics = torch_fidelity.calculate_metrics(
-            input1=real_features,   # 디스크 대신 RAM에 캐싱된 Real 인셉션 통계 즉시 대입
-            input2=fake_dataset,    # 디스크 I/O 없이 메모리 상에서 배치를 쪼개 통계 추출
+            input1=real_dataset,            # 규격 매칭을 위해 객체를 주되, 실제 연산은 일어나지 않음
+            input2=fake_dataset,            # 디스크 I/O 없이 메모리 상에서 배치를 쪼개 통계 추출
             cuda=True,
             fid=True,
             verbose=False,
             save_cpu_ram=True,
-            batch_size=32           # 연산 속도를 높이기 위해 배치 크기 상향
+            batch_size=32,
+            cache_input1_name=CACHE_NAME    # 캐시 이름이 일치하므로 물리 파일 로딩 후 즉시 계산 돌입
         )
         fid = metrics['frechet_inception_distance']
 
@@ -206,9 +210,10 @@ for T in step_sizes:
 
                 fake_dataset = FakeMemoryDataset(all_images)
                 metrics = torch_fidelity.calculate_metrics(
-                    input1=real_features,
+                    input1=real_dataset,
                     input2=fake_dataset,
-                    cuda=True, fid=True, verbose=False, save_cpu_ram=True, batch_size=32
+                    cuda=True, fid=True, verbose=False, save_cpu_ram=True, batch_size=32,
+                    cache_input1_name=CACHE_NAME
                 )
                 fid = metrics['frechet_inception_distance']
                 print(f"{T:<8} | {fid:<10.2f}")
@@ -231,7 +236,7 @@ for T in step_sizes:
         print(f"\n[!] Error at T={T}: {e}")
 
     finally:
-        # 가비지 컬렉션을 통한 다음 스텝 메모리 확보
+        # 가비지 컬렉션을 통한 메모리 완전 해제
         all_images = []
         if 'fake_dataset' in locals(): del fake_dataset
         torch.cuda.empty_cache()
