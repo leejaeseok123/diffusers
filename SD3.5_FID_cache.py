@@ -23,7 +23,7 @@ FIXED_BATCH_SIZE = 4
 TOTAL_IMAGES = 10000
 SEED = 42
 
-step_sizes = [10, 12, 14, 16, 18, 20, 30, 40, 50]
+step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
 base_path            = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
@@ -94,12 +94,12 @@ if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < T
 real_dataset = RealMemoryDataset(real_images_path, TOTAL_IMAGES)
 
 # -----------------------
-# 모델 로드
+# 모델 로드 (bfloat16 - SD3.5 공식 권장)
 # -----------------------
 print(f"[*] Loading {MODEL_ID}...")
 pipe = StableDiffusion3Pipeline.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.float16
+    torch_dtype=torch.bfloat16
 ).to("cuda")
 
 pipe.enable_attention_slicing()
@@ -107,19 +107,20 @@ pipe.set_progress_bar_config(disable=True)
 prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES)
 
 # -----------------------
-# [핵심 최적화 1] Real 이미지의 Feature(인셉션 통계) 딱 한 번만 계산하여 캐싱
+# [핵심 최적화] Real 이미지의 Feature(인셉션 통계) 딱 한 번만 계산하여 캐싱
 # -----------------------
 print("[*] Real 이미지 인셉션 특징 추출 중 (최초 1회만 실행)...")
 real_features = torch_fidelity.calculate_metrics(
     input1=real_dataset,
     cuda=True,
-    fid=True,
+    fid=False,                                   # input2 없이 연산하기 위해 False로 설정
+    isc=True,                                    # 내부 인셉션 모델 활성화를 위해 True 설정
     verbose=False,
     save_cpu_ram=True,
     batch_size=32,
-    get_input1_features_instead_of_metrics=True  # 이 옵션으로 피처 통계만 추출합니다.
+    get_input1_features_instead_of_metrics=True  # 실제 스코어 연산 없이 인셉션 피처만 쏙 뽑아 변수에 저장
 )
-print("[✔] Real 이미지 특징 캐싱 완료! 이제 스텝별 계산이 극도로 빨라집니다.\n")
+print("[✔] Real 이미지 특징 캐싱 완료! 이제 스텝별 계산이 극도로 빠라집니다.\n")
 
 # -----------------------
 # 실험 루프
@@ -141,7 +142,7 @@ for T in step_sizes:
         gc.collect()
 
         print(f"[*] Steps={T}: 이미지 생성 중...", end=" ", flush=True)
-        all_images = []  # RAM에 압축된 PIL 이미지 객체 형태로 보관 (10,000장 기준 약 2.5GB 소모)
+        all_images = []  # RAM에 압축된 PIL 이미지 객체 형태로 보관 (10,000장 기준 약 2.5GB 소모하여 안전함)
 
         with torch.inference_mode():
             for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
@@ -155,22 +156,22 @@ for T in step_sizes:
                     height=H, width=W,
                     generator=generator
                 )
-                all_images.extend(output.images)  # 디스크에 저장하지 않고 리스트에 추가
+                all_images.extend(output.images)  # 디스크 파일 저장 과정을 완전히 생략
 
         print(f"완료 ({len(all_images)}장) → FID 계산 중...", end=" ", flush=True)
         
         # Fake용 온디맨드 데이터셋 생성
         fake_dataset = FakeMemoryDataset(all_images)
 
-        # [핵심 최적화 2] 캐싱된 Real 특징 입력 및 메모리 상의 Fake 데이터셋 연산
+        # 캐싱된 Real 특징과 메모리 기반 Fake 데이터셋을 바인딩하여 계산
         metrics = torch_fidelity.calculate_metrics(
-            input1=real_features,   # 디스크 대신 RAM에 저장된 Real 인셉션 통계 즉시 대입
+            input1=real_features,   # 디스크 대신 RAM에 캐싱된 Real 인셉션 통계 즉시 대입
             input2=fake_dataset,    # 디스크 I/O 없이 메모리 상에서 배치를 쪼개 통계 추출
             cuda=True,
             fid=True,
             verbose=False,
             save_cpu_ram=True,
-            batch_size=32           # FID 계산 배치 크기를 늘려 GPU 성능 최대 활용
+            batch_size=32           # 연산 속도를 높이기 위해 배치 크기 상향
         )
         fid = metrics['frechet_inception_distance']
 
@@ -230,7 +231,7 @@ for T in step_sizes:
         print(f"\n[!] Error at T={T}: {e}")
 
     finally:
-        # 가비지 컬렉션을 통한 메모리 완전 비우기
+        # 가비지 컬렉션을 통한 다음 스텝 메모리 확보
         all_images = []
         if 'fake_dataset' in locals(): del fake_dataset
         torch.cuda.empty_cache()
