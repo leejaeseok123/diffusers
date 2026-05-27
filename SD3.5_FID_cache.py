@@ -25,7 +25,7 @@ SEED = 42
 # torch_fidelity 내장 시스템이 로컬 디렉토리에 물리적으로 보관할 캐시 이름 지정
 CACHE_NAME = f"real_10k_{H}_cache_v1"
 
-step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
+step_sizes = [16, 18, 20, 30, 40, 50]
 
 base_path            = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
