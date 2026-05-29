@@ -18,10 +18,10 @@ sys.stdout.reconfigure(line_buffering=True)
 # -----------------------
 # 1. 설정 및 환경 준비
 # -----------------------
-VERSION = "SDXL_Base"
+VERSION = "SDXL_Base_FP32"
 MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 H, W = 1024, 1024
-FIXED_BATCH_SIZE = 8  # 배치 사이즈 고정
+FIXED_BATCH_SIZE = 8  
 TOTAL_IMAGES = 10000
 SEED = 42
 CACHE_NAME = f"real_10k_{H}_cache_v1"
@@ -62,21 +62,17 @@ if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < T
 prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES)
 
 # -----------------------
-# 2. 모델 로드 및 VAE 업캐스팅 (에러 해결 핵심)
+# 2. 모델 로드 (완전한 float32 통일)
 # -----------------------
-print(f"[*] Loading SDXL 1.0 ({H}x{W})...")
+print(f"[*] Loading SDXL 1.0 in Full FP32 ({H}x{W})...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.float16,
-    use_safetensors=True,
-    variant="fp16"
+    torch_dtype=torch.float32,     # [핵심] fp16 대신 완전히 fp32로 로드
+    use_safetensors=True
+    # variant="fp16" 라인 제거 (fp32 순정 가중치 다운로드)
 ).to("cuda")
 
-# [핵심 수정] 가중치 수동 변경 대신 Diffusers 내장 upcast_vae()를 사용하여 
-# Latent 변수 타입 불일치 에러(Half vs Float)를 원천 차단합니다.
-pipe.upcast_vae()
-
-# 최신 API 반영 및 메모리 가속 활성화
+# 메모리 최적화 켜기 (fp32는 무겁기 때문에 필수입니다)
 pipe.vae.enable_slicing()
 pipe.vae.enable_tiling()
 
@@ -104,11 +100,10 @@ _ = torch_fidelity.calculate_metrics(
 print("[✔] Real 이미지 특징 캐싱 완료!\n")
 
 # -----------------------
-# 4. 실험 루프 (완성본)
+# 4. 실험 루프 (순정 코드로 원상복구)
 # -----------------------
 os.makedirs(os.path.dirname(csv_output_file), exist_ok=True)
 
-# 결과 저장을 위한 CSV 헤더 생성
 with open(csv_output_file, mode='w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(["Version", "Steps", "FID_Score"])
@@ -116,18 +111,16 @@ with open(csv_output_file, mode='w', newline='') as f:
 for steps in step_sizes:
     print(f"[*] Steps={steps}: 이미지 생성 중...")
     
-    # 각 Step별 임시 생성 이미지 저장 폴더 지정
     step_img_dir = os.path.join(generated_base_path, f"steps_{steps}")
     os.makedirs(step_img_dir, exist_ok=True)
     
-    # 제너레이터 시드 고정 (동일 스텝별 비교 환경 일치)
     generator = torch.Generator(device="cuda").manual_seed(SEED)
     
     try:
-        # 배치 단위로 이미지 생성 진행 (10,000장 분량)
         for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
             batch_prompts = prompt_pool[i : i + FIXED_BATCH_SIZE]
             
+            # 모든 텐서가 fp32이므로 복잡한 분리 처리나 autocast 없이 바로 호출 가능
             with torch.inference_mode():
                 outputs = pipe(
                     prompt=batch_prompts,
@@ -137,14 +130,14 @@ for steps in step_sizes:
                     generator=generator
                 ).images
             
-            # 생성된 배치 이미지 디스크 저장
+            # 이미지 저장
             for idx, img in enumerate(outputs):
                 img_idx = i + idx
                 img.save(os.path.join(step_img_dir, f"gen_{img_idx:05d}.png"))
         
         print(f"[✔] Steps={steps}: 이미지 생성 완료. FID 측정 시작...")
         
-        # torch_fidelity를 이용한 캐싱 기반 고속 FID 측정
+        # FID 측정
         metrics = torch_fidelity.calculate_metrics(
             input1=step_img_dir,
             input2=real_images_path,
@@ -153,13 +146,12 @@ for steps in step_sizes:
             verbose=False,
             save_cpu_ram=True,
             batch_size=32,
-            cache_input2_name=CACHE_NAME  # 앞서 캐싱한 Real 데이터셋 활용
+            cache_input2_name=CACHE_NAME
         )
         
         fid_score = metrics['frechet_inception_distance']
         print(f"[⭐] Steps={steps} -> FID Score: {fid_score:.4f}")
         
-        # CSV 결과 누적 기록
         with open(csv_output_file, mode='a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([VERSION, steps, fid_score])
@@ -168,11 +160,9 @@ for steps in step_sizes:
         print(f"[!] Error at T={steps}: {e}")
         
     finally:
-        # 디스크 용량 확보를 위해 측정이 끝난 이미지 폴더 삭제 (필요시 주석 처리)
         if os.path.exists(step_img_dir):
             shutil.rmtree(step_img_dir)
             
-        # 루프 간 GPU 메모리 완전 파편화 방지 및 비우기
         gc.collect()
         torch.cuda.empty_cache()
 
