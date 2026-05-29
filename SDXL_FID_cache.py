@@ -75,7 +75,7 @@ if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < T
     print(f"[*] Real 데이터셋 준비 완료!\n")
 
 # -----------------------
-# 모델 로드 (float16 최적화)
+# 모델 로드 (float16 최적화 및 VAE 정밀도 보정)
 # -----------------------
 print(f"[*] Loading {MODEL_ID}...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
@@ -83,6 +83,9 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     torch_dtype=torch.float16,  
     use_safetensors=True
 ).to("cuda")
+
+# [수정] VAE 디코더 연산만 float32로 업캐스팅하여 invalid value(NaN) 에러 원천 차단
+pipe.vae.to(torch.float32)
 
 # DDIM 스케줄러 적용
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
@@ -125,8 +128,7 @@ for T in step_sizes:
 
         print(f"[*] Steps={T}: 이미지 생성 중...", end=" ", flush=True)
         
-        # [인메모리 핵심] 파편화 방지용 단일 거대 텐서 블록 할당 (약 31.5GB)
-        # pin_memory()를 통해 GPU 전송 하드웨어 가속 트리거
+        # [인메모리 최적화] 파편화 방지용 단일 거대 텐서 블록 할당 (약 31.5GB)
         fake_tensor_pool = torch.zeros((TOTAL_IMAGES, 3, H, W), dtype=torch.uint8).pin_memory()
 
         with torch.inference_mode():
@@ -144,14 +146,13 @@ for T in step_sizes:
                         generator=generator
                     )
 
-                # 생성 즉시 가속 텐서 블록의 특정 인덱스 구역에 Direct 주입
-                # 사용된 임시 PIL 객체는 루프를 돌며 자동으로 메모리에서 소멸됨
+                # 생성 즉시 가속 텐서 블록에 주입하여 RAM 누수 및 디스크 쓰기 병목 제거
                 for idx, pil_img in enumerate(output.images):
                     arr = np.array(pil_img.convert('RGB'), dtype=np.uint8)
                     tensor_img = torch.from_numpy(arr).permute(2, 0, 1) # [3, H, W]
                     fake_tensor_pool[i + idx] = tensor_img
                 
-                # 주기적인 VRAM 캐시 정리로 파편화 및 GPU OOM 방어
+                # 주기적인 VRAM 캐시 정리
                 if i % 100 == 0:
                     torch.cuda.empty_cache()
 
@@ -168,7 +169,7 @@ for T in step_sizes:
             verbose=False,
             save_cpu_ram=True,
             batch_size=32,
-            cache_input1_name=CACHE_NAME # 갱신된 캐시 파일 자동 로딩
+            cache_input1_name=CACHE_NAME # 앞서 생성한 물리 캐시 파일 로드
         )
         fid = metrics['frechet_inception_distance']
 
@@ -198,7 +199,7 @@ for T in step_sizes:
             writer.writerow([T, "ERROR", FIXED_BATCH_SIZE, f"{H}x{W}"])
 
     finally:
-        # 스텝이 끝날 때마다 31.5GB 대형 텐서 블록을 가비지 컬렉터로 즉시 해제하여 RAM 청소
+        # 가비지 컬렉션을 통한 인메모리 풀 완전 해제
         if 'fake_tensor_pool' in locals(): del fake_tensor_pool
         if 'fake_dataset' in locals(): del fake_dataset
         torch.cuda.empty_cache()
