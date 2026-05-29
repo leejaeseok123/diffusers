@@ -130,4 +130,96 @@ print("[✔] Real 이미지 특징 캐싱 완료!\n")
 # -----------------------
 os.makedirs(os.path.dirname(csv_output_file), exist_ok=True)
 
-if not os
+if not os.path.exists(csv_output_file):
+    with open(csv_output_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Steps", "FID", "BatchSize", "Resolution"])
+
+print(f"{'Steps':<8} | {'FID':<10}")
+print("-" * 20)
+
+for T in step_sizes:
+    seed_everything(SEED)
+
+    try:
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        print(f"[*] Steps={T}: 이미지 생성 중...", end=" ", flush=True)
+        
+        # 인메모리 파편화 방지용 단일 거대 텐서 블록 할당 (약 31.5GB)
+        fake_tensor_pool = torch.zeros((TOTAL_IMAGES, 3, H, W), dtype=torch.uint8).pin_memory()
+
+        # CLIP 코드와 동일하게 순수 inference_mode 전개하여 정밀도 충돌 완벽 차단
+        with torch.inference_mode():
+            for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
+                batch_prompts = prompt_pool[i:i+FIXED_BATCH_SIZE]
+                if not batch_prompts: break
+
+                generator = torch.Generator(device="cuda").manual_seed(SEED + i)
+                
+                output = pipe(
+                    prompt=batch_prompts,
+                    num_inference_steps=T,
+                    height=H, width=W,
+                    generator=generator
+                )
+
+                for idx, pil_img in enumerate(output.images):
+                    arr = np.array(pil_img.convert('RGB'), dtype=np.uint8)
+                    tensor_img = torch.from_numpy(arr).permute(2, 0, 1)
+                    fake_tensor_pool[i + idx] = tensor_img
+                
+                # CLIP 코드의 검증된 주기적 VRAM 클리어 패턴 이식
+                if (i + FIXED_BATCH_SIZE) % 80 == 0:
+                    torch.cuda.empty_cache()
+
+        print("완료 (In-RAM 텐서화 완료) → FID 계산 중...", end=" ", flush=True)
+        
+        fake_dataset = OptimizedInferenceDataset(fake_tensor_pool)
+
+        metrics = torch_fidelity.calculate_metrics(
+            input1=real_images_path,
+            input2=fake_dataset,
+            cuda=True,
+            fid=True,
+            verbose=False,
+            save_cpu_ram=True,
+            batch_size=32,
+            cache_input1_name=CACHE_NAME
+        )
+        fid = metrics['frechet_inception_distance']
+
+        print(f"완료 (FID: {fid:.2f})")
+        print(f"{T:<8} | {fid:<10.2f}")
+
+        with open(csv_output_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([T, fid, FIXED_BATCH_SIZE, f"{H}x{W}"])
+
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            print(f"\n[!] OOM at T={T} 스킵")
+            with open(csv_output_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([T, "OOM", FIXED_BATCH_SIZE, f"{H}x{W}"])
+        else:
+            print(f"\n[!] Error at T={T}: {e}")
+            with open(csv_output_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([T, "ERROR", FIXED_BATCH_SIZE, f"{H}x{W}"])
+
+    except Exception as e:
+        print(f"\n[!] Error at T={T}: {e}")
+        with open(csv_output_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([T, "ERROR", FIXED_BATCH_SIZE, f"{H}x{W}"])
+
+    finally:
+        if 'fake_tensor_pool' in locals(): del fake_tensor_pool
+        if 'fake_dataset' in locals(): del fake_dataset
+        torch.cuda.empty_cache()
+        gc.collect()
+
+print(f"\n[✔] {VERSION} FID 실험 완료!")
+print(f"[*] 결과: {csv_output_file}")
