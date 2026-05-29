@@ -5,6 +5,7 @@ import random
 import csv
 import os
 import gc
+import shutil
 import numpy as np
 from PIL import Image
 from diffusers import StableDiffusionXLPipeline
@@ -20,7 +21,7 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "SDXL_Base"
 MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 H, W = 1024, 1024
-FIXED_BATCH_SIZE = 8  # CLIP 코드의 안정적인 배치 사이즈 패턴 적용
+FIXED_BATCH_SIZE = 8  # 배치 사이즈 고정
 TOTAL_IMAGES = 10000
 SEED = 42
 CACHE_NAME = f"real_10k_{H}_cache_v1"
@@ -30,6 +31,7 @@ step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 base_path            = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
 real_images_path     = f"{base_path}/real_10k_{H}"
+generated_base_path  = f"{base_path}/generated_{VERSION}"
 csv_output_file      = f"{base_path}/results/{VERSION}_FID.csv"
 
 # 재현성 고정
@@ -37,28 +39,6 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-
-# -----------------------
-# 인메모리 고속 전용 Dataset
-# -----------------------
-class OptimizedInferenceDataset(Dataset):
-    def __init__(self, tensor_pool):
-        self.tensor_pool = tensor_pool
-
-    def __len__(self):
-        return len(self.tensor_pool)
-
-    def __getitem__(self, idx):
-        return self.tensor_pool[idx]
-
-# -----------------------
-# 데이터 로드 및 공통 함수
-# -----------------------
-def seed_everything(target_seed):
-    random.seed(target_seed)
-    np.random.seed(target_seed)
-    torch.manual_seed(target_seed)
-    torch.cuda.manual_seed_all(target_seed)
 
 def load_coco_prompts(path, n):
     print("[*] Loading COCO prompts...")
@@ -82,7 +62,7 @@ if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < T
 prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES)
 
 # -----------------------
-# 2. 모델 로드 (CLIP 성공 버전과 1:1 완전 일치)
+# 2. 모델 로드 및 VAE 업캐스팅 (에러 해결 핵심)
 # -----------------------
 print(f"[*] Loading SDXL 1.0 ({H}x{W})...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
@@ -92,15 +72,13 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     variant="fp16"
 ).to("cuda")
 
-# [CLIP 핵심 조치 1] 다른 부분은 절대 건드리지 않고 오직 VAE만 fp32로 강제 업캐스팅
-pipe.vae.to(dtype=torch.float32)
+# [핵심 수정] 가중치 수동 변경 대신 Diffusers 내장 upcast_vae()를 사용하여 
+# Latent 변수 타입 불일치 에러(Half vs Float)를 원천 차단합니다.
+pipe.upcast_vae()
 
-# [CLIP 핵심 조치 2] 최신 API 반영 및 메모리 슬라이싱 활성화
+# 최신 API 반영 및 메모리 가속 활성화
 pipe.vae.enable_slicing()
 pipe.vae.enable_tiling()
-
-# ※ 타입 꼬임의 주범이었던 pipe.scheduler 오버라이드 및 pipe.to() 라인을 통째로 제거했습니다.
-# 패키지 기본 내장 스케줄러 정렬 상태를 그대로 활용합니다.
 
 try:
     import xformers
@@ -126,100 +104,76 @@ _ = torch_fidelity.calculate_metrics(
 print("[✔] Real 이미지 특징 캐싱 완료!\n")
 
 # -----------------------
-# 4. 실험 루프
+# 4. 실험 루프 (완성본)
 # -----------------------
 os.makedirs(os.path.dirname(csv_output_file), exist_ok=True)
 
-if not os.path.exists(csv_output_file):
-    with open(csv_output_file, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Steps", "FID", "BatchSize", "Resolution"])
+# 결과 저장을 위한 CSV 헤더 생성
+with open(csv_output_file, mode='w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(["Version", "Steps", "FID_Score"])
 
-print(f"{'Steps':<8} | {'FID':<10}")
-print("-" * 20)
-
-for T in step_sizes:
-    seed_everything(SEED)
-
+for steps in step_sizes:
+    print(f"[*] Steps={steps}: 이미지 생성 중...")
+    
+    # 각 Step별 임시 생성 이미지 저장 폴더 지정
+    step_img_dir = os.path.join(generated_base_path, f"steps_{steps}")
+    os.makedirs(step_img_dir, exist_ok=True)
+    
+    # 제너레이터 시드 고정 (동일 스텝별 비교 환경 일치)
+    generator = torch.Generator(device="cuda").manual_seed(SEED)
+    
     try:
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        print(f"[*] Steps={T}: 이미지 생성 중...", end=" ", flush=True)
-        
-        # 인메모리 파편화 방지용 단일 거대 텐서 블록 할당 (약 31.5GB)
-        fake_tensor_pool = torch.zeros((TOTAL_IMAGES, 3, H, W), dtype=torch.uint8).pin_memory()
-
-        # CLIP 코드와 동일하게 순수 inference_mode 전개하여 정밀도 충돌 완벽 차단
-        with torch.inference_mode():
-            for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
-                batch_prompts = prompt_pool[i:i+FIXED_BATCH_SIZE]
-                if not batch_prompts: break
-
-                generator = torch.Generator(device="cuda").manual_seed(SEED + i)
-                
-                output = pipe(
+        # 배치 단위로 이미지 생성 진행 (10,000장 분량)
+        for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
+            batch_prompts = prompt_pool[i : i + FIXED_BATCH_SIZE]
+            
+            with torch.inference_mode():
+                outputs = pipe(
                     prompt=batch_prompts,
-                    num_inference_steps=T,
-                    height=H, width=W,
+                    num_inference_steps=steps,
+                    height=H,
+                    width=W,
                     generator=generator
-                )
-
-                for idx, pil_img in enumerate(output.images):
-                    arr = np.array(pil_img.convert('RGB'), dtype=np.uint8)
-                    tensor_img = torch.from_numpy(arr).permute(2, 0, 1)
-                    fake_tensor_pool[i + idx] = tensor_img
-                
-                # CLIP 코드의 검증된 주기적 VRAM 클리어 패턴 이식
-                if (i + FIXED_BATCH_SIZE) % 80 == 0:
-                    torch.cuda.empty_cache()
-
-        print("완료 (In-RAM 텐서화 완료) → FID 계산 중...", end=" ", flush=True)
+                ).images
+            
+            # 생성된 배치 이미지 디스크 저장
+            for idx, img in enumerate(outputs):
+                img_idx = i + idx
+                img.save(os.path.join(step_img_dir, f"gen_{img_idx:05d}.png"))
         
-        fake_dataset = OptimizedInferenceDataset(fake_tensor_pool)
-
+        print(f"[✔] Steps={steps}: 이미지 생성 완료. FID 측정 시작...")
+        
+        # torch_fidelity를 이용한 캐싱 기반 고속 FID 측정
         metrics = torch_fidelity.calculate_metrics(
-            input1=real_images_path,
-            input2=fake_dataset,
+            input1=step_img_dir,
+            input2=real_images_path,
             cuda=True,
             fid=True,
             verbose=False,
             save_cpu_ram=True,
             batch_size=32,
-            cache_input1_name=CACHE_NAME
+            cache_input2_name=CACHE_NAME  # 앞서 캐싱한 Real 데이터셋 활용
         )
-        fid = metrics['frechet_inception_distance']
-
-        print(f"완료 (FID: {fid:.2f})")
-        print(f"{T:<8} | {fid:<10.2f}")
-
-        with open(csv_output_file, 'a', newline='') as f:
+        
+        fid_score = metrics['frechet_inception_distance']
+        print(f"[⭐] Steps={steps} -> FID Score: {fid_score:.4f}")
+        
+        # CSV 결과 누적 기록
+        with open(csv_output_file, mode='a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([T, fid, FIXED_BATCH_SIZE, f"{H}x{W}"])
-
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower():
-            print(f"\n[!] OOM at T={T} 스킵")
-            with open(csv_output_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([T, "OOM", FIXED_BATCH_SIZE, f"{H}x{W}"])
-        else:
-            print(f"\n[!] Error at T={T}: {e}")
-            with open(csv_output_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([T, "ERROR", FIXED_BATCH_SIZE, f"{H}x{W}"])
-
+            writer.writerow([VERSION, steps, fid_score])
+            
     except Exception as e:
-        print(f"\n[!] Error at T={T}: {e}")
-        with open(csv_output_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([T, "ERROR", FIXED_BATCH_SIZE, f"{H}x{W}"])
-
+        print(f"[!] Error at T={steps}: {e}")
+        
     finally:
-        if 'fake_tensor_pool' in locals(): del fake_tensor_pool
-        if 'fake_dataset' in locals(): del fake_dataset
-        torch.cuda.empty_cache()
+        # 디스크 용량 확보를 위해 측정이 끝난 이미지 폴더 삭제 (필요시 주석 처리)
+        if os.path.exists(step_img_dir):
+            shutil.rmtree(step_img_dir)
+            
+        # 루프 간 GPU 메모리 완전 파편화 방지 및 비우기
         gc.collect()
+        torch.cuda.empty_cache()
 
-print(f"\n[✔] {VERSION} FID 실험 완료!")
-print(f"[*] 결과: {csv_output_file}")
+print(f"\n[🎉] 모든 실험 완료! 결과가 {csv_output_file}에 저장되었습니다.")
