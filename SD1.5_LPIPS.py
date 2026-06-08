@@ -25,7 +25,7 @@ step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
 base_path            = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-coco_image_src       = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/val2014"
+coco_image_src       = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/val2014/val2014"
 real_images_path     = f"{base_path}/real_1k_{H}"
 csv_output_file      = f"{base_path}/results/{VERSION}_LPIPS.csv"
 
