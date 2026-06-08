@@ -17,7 +17,7 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "v3.5"
 MODEL_ID = "stabilityai/stable-diffusion-3.5-medium"
 H, W = 1024, 1024
-FIXED_BATCH_SIZE = 4
+FIXED_BATCH_SIZE = 1
 TOTAL_IMAGES = 1000
 SEED = 42
 
