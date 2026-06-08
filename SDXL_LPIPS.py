@@ -13,88 +13,40 @@ import torchvision.transforms as transforms
 
 sys.stdout.reconfigure(line_buffering=True)
 
-# Experiment Configuration
 VERSION = "SDXL"
 MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 H, W = 1024, 1024
 FIXED_BATCH_SIZE = 1
 TOTAL_IMAGES = 1000
 SEED = 42
+REFERENCE_STEP = 100
 
 step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
 base_path            = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-coco_image_src       = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/val2014/val2014"
-real_images_path     = f"{base_path}/real_1k_{H}"
+ref_images_path      = f"{base_path}/ref_{VERSION}_T{REFERENCE_STEP}"
 csv_output_file      = f"{base_path}/results/{VERSION}_LPIPS.csv"
 
-# LPIPS 전처리: [-1, 1] 정규화
 lpips_transform = transforms.Compose([
     transforms.Resize((H, W)),
     transforms.ToTensor(),
-    transforms.Normalize([0.5, 0.5, 0.5],
-                         [0.5, 0.5, 0.5])
+    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 ])
 
-# Helper Functions
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-# COCO (image_filename, caption) pair 로드
-def load_coco_pairs(path, n):
-    print("[INFO] Loading COCO image-caption pairs...")
+def load_coco_prompts(path, n):
+    print("[INFO] Loading COCO prompts...")
     with open(path, 'r') as f:
         data = json.load(f)
+    captions = sorted(list(set([ann['caption'] for ann in data['annotations']])))
+    return captions[:n]
 
-    id2file = {img['id']: img['file_name'] for img in data['images']}
-
-    seen = set()
-    pairs = []
-    for ann in sorted(data['annotations'], key=lambda x: x['image_id']):
-        img_id = ann['image_id']
-        if img_id not in seen:
-            seen.add(img_id)
-            pairs.append((id2file[img_id], ann['caption']))
-
-    pairs = pairs[:n]
-    print(f"[INFO] Loaded {len(pairs)} pairs.")
-    return pairs
-
-# Real 이미지 준비
-def prepare_real_images(pairs, src_dir, dst_dir, H, W):
-    os.makedirs(dst_dir, exist_ok=True)
-    existing = set(os.listdir(dst_dir))
-
-    for i, (fname, _) in enumerate(pairs):
-        dst_name = f"{i:05d}.png"
-        if dst_name in existing:
-            continue
-        src_path = os.path.join(src_dir, fname)
-        if not os.path.exists(src_path):
-            raise FileNotFoundError(f"[ERROR] Real image not found: {src_path}")
-        img = Image.open(src_path).convert('RGB')
-        img = img.resize((H, W), resample=Image.LANCZOS)
-        img.save(os.path.join(dst_dir, dst_name))
-
-    print(f"[INFO] Real dataset ready: {dst_dir}\n")
-
-# COCO pair 로드
-pairs       = load_coco_pairs(coco_annotation_path, TOTAL_IMAGES)
-real_fnames = [f"{i:05d}.png" for i in range(len(pairs))]
-prompt_pool = [caption for _, caption in pairs]
-
-# Real 이미지 준비
-if not os.path.exists(real_images_path) or len(os.listdir(real_images_path)) < TOTAL_IMAGES:
-    print(f"[INFO] Preparing real images ({H}x{W})...")
-    prepare_real_images(pairs, coco_image_src, real_images_path, H, W)
-else:
-    print(f"[INFO] Real images already exist: {real_images_path}")
-
-# Model Loading (SDXL - float32)
 print(f"[INFO] Loading {MODEL_ID} (float32)...")
 pipe = StableDiffusionXLPipeline.from_pretrained(
     MODEL_ID,
@@ -113,13 +65,40 @@ except ImportError:
     pass
 
 pipe.set_progress_bar_config(disable=True)
+prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES)
 
-# LPIPS 모델 로드
 print("[INFO] Loading LPIPS model (VGG)...")
 loss_fn_lpips = lpips.LPIPS(net='vgg').cuda()
 loss_fn_lpips.eval()
 
-# CSV Initialization
+if not os.path.exists(ref_images_path) or len(os.listdir(ref_images_path)) < TOTAL_IMAGES:
+    print(f"[INFO] Generating reference images (T={REFERENCE_STEP})...")
+    os.makedirs(ref_images_path, exist_ok=True)
+    seed_everything(SEED)
+
+    with torch.inference_mode():
+        for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
+            batch_prompts = prompt_pool[i : i + FIXED_BATCH_SIZE]
+            if not batch_prompts:
+                break
+            generator = torch.Generator(device="cuda").manual_seed(SEED + i)
+            output = pipe(
+                prompt=batch_prompts,
+                num_inference_steps=REFERENCE_STEP,
+                height=H, width=W,
+                generator=generator
+            )
+            for j, img in enumerate(output.images):
+                img.save(os.path.join(ref_images_path, f"{i+j:05d}.png"))
+            del output
+            torch.cuda.empty_cache()
+
+    print(f"[INFO] Reference images saved: {ref_images_path}\n")
+else:
+    print(f"[INFO] Reference images already exist: {ref_images_path}")
+
+ref_fnames = sorted(os.listdir(ref_images_path))[:TOTAL_IMAGES]
+
 os.makedirs(os.path.dirname(csv_output_file), exist_ok=True)
 if not os.path.exists(csv_output_file):
     with open(csv_output_file, 'w', newline='') as f:
@@ -129,7 +108,6 @@ if not os.path.exists(csv_output_file):
 print(f"{'Steps':<8} | {'LPIPS':<12}")
 print("-" * 23)
 
-# Main Evaluation Loop
 for T in step_sizes:
     seed_everything(SEED)
 
@@ -143,11 +121,10 @@ for T in step_sizes:
         with torch.inference_mode():
             for i in range(0, TOTAL_IMAGES, FIXED_BATCH_SIZE):
                 batch_prompts = prompt_pool[i : i + FIXED_BATCH_SIZE]
-                batch_fnames  = real_fnames[i : i + FIXED_BATCH_SIZE]
+                batch_fnames  = ref_fnames[i : i + FIXED_BATCH_SIZE]
                 if not batch_prompts:
                     break
 
-                # 1. 해당 캡션으로 이미지 생성
                 generator = torch.Generator(device="cuda").manual_seed(SEED + i)
                 output = pipe(
                     prompt=batch_prompts,
@@ -156,28 +133,23 @@ for T in step_sizes:
                     generator=generator
                 )
 
-                # 2. 대응되는 real 이미지 로드
-                real_tensors = torch.stack([
-                    lpips_transform(Image.open(os.path.join(real_images_path, f)).convert('RGB'))
+                ref_tensors = torch.stack([
+                    lpips_transform(Image.open(os.path.join(ref_images_path, f)).convert('RGB'))
                     for f in batch_fnames
                 ]).cuda()
 
-                # 3. generated → 텐서 변환 (저장 없이 바로)
                 gen_tensors = torch.stack([
                     lpips_transform(img) for img in output.images
                 ]).cuda()
 
-                # 4. LPIPS 계산
-                d = loss_fn_lpips(real_tensors, gen_tensors)  # (B, 1, 1, 1)
+                d = loss_fn_lpips(ref_tensors, gen_tensors)
                 total_score += d.sum().item()
                 count += len(batch_prompts)
 
-                # 5. 즉시 메모리 해제
-                del real_tensors, gen_tensors, d, output
+                del ref_tensors, gen_tensors, d, output
                 torch.cuda.empty_cache()
 
         lpips_score = total_score / count
-
         print(f"{T:<8} | {lpips_score:<12.4f}")
 
         with open(csv_output_file, 'a', newline='') as f:
