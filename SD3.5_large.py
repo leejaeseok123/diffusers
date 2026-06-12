@@ -18,7 +18,8 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "sd3.5-large"
 MODEL_ID = "stabilityai/stable-diffusion-3.5-large"
 H, W = 1024, 1024
-FIXED_BATCH_SIZE = 8
+BATCH_SIZE_QUALITY = 1   # CLIP, LPIPS용
+BATCH_SIZE_LATENCY = 8   # Latency용
 TOTAL_IMAGES_QUALITY = 1000  # CLIP, LPIPS
 TOTAL_IMAGES_LATENCY = 300   # Latency
 SEED = 42
@@ -82,8 +83,8 @@ if not os.path.exists(ref_images_path) or len(os.listdir(ref_images_path)) < TOT
     seed_everything(SEED)
 
     with torch.inference_mode():
-        for i in range(0, TOTAL_IMAGES_QUALITY, FIXED_BATCH_SIZE):
-            batch_prompts = prompt_pool[i : i + FIXED_BATCH_SIZE]
+        for i in range(0, TOTAL_IMAGES_QUALITY, BATCH_SIZE_QUALITY):
+            batch_prompts = prompt_pool[i : i + BATCH_SIZE_QUALITY]
             if not batch_prompts:
                 break
             generator = torch.Generator(device="cuda").manual_seed(SEED + i)
@@ -124,9 +125,9 @@ for T in step_sizes:
         count = 0
 
         with torch.inference_mode():
-            for i in range(0, TOTAL_IMAGES_QUALITY, FIXED_BATCH_SIZE):
-                batch_prompts = prompt_pool[i : i + FIXED_BATCH_SIZE]
-                batch_fnames  = ref_fnames[i : i + FIXED_BATCH_SIZE]
+            for i in range(0, TOTAL_IMAGES_QUALITY, BATCH_SIZE_QUALITY):
+                batch_prompts = prompt_pool[i : i + BATCH_SIZE_QUALITY]
+                batch_fnames  = ref_fnames[i : i + BATCH_SIZE_QUALITY]
                 if not batch_prompts:
                     break
 
@@ -168,7 +169,7 @@ for T in step_sizes:
         with torch.inference_mode():
             generator = torch.Generator(device="cuda").manual_seed(SEED)
             _ = pipe(
-                prompt=prompt_pool[:FIXED_BATCH_SIZE],  # Latency: 배치 1번
+                prompt=prompt_pool[:BATCH_SIZE_LATENCY],  # Latency: 배치 1번
                 num_inference_steps=T,
                 height=H, width=W,
                 generator=generator
