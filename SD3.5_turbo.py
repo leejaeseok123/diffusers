@@ -18,12 +18,12 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "sd3.5-large-turbo"
 MODEL_ID = "stabilityai/stable-diffusion-3.5-large-turbo"
 H, W = 1024, 1024
-BATCH_SIZE_QUALITY = 1   # CLIP, LPIPS용
-BATCH_SIZE_LATENCY = 8   # Latency용
+BATCH_SIZE_QUALITY = 1   # CLIP, LPIPS
+BATCH_SIZE_LATENCY = 8   # Latency
 TOTAL_IMAGES_QUALITY = 1000  # CLIP, LPIPS
 TOTAL_IMAGES_LATENCY = 300   # Latency
 SEED = 42
-REFERENCE_STEP = 100
+REFERENCE_STEP = 100 # LPIPS
 
 step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
@@ -158,11 +158,18 @@ for T in step_sizes:
                     padding=True,
                     truncation=True
                 ).to("cuda")
-                clip_outputs = clip_model(**clip_inputs)
-                total_clip += clip_outputs.logits_per_image.diag().sum().item()
+                image_embeds = clip_model.get_image_features(pixel_values=clip_inputs['pixel_values'])
+                text_embeds  = clip_model.get_text_features(
+                    input_ids=clip_inputs['input_ids'],
+                    attention_mask=clip_inputs['attention_mask']
+                )
+                image_embeds = torch.nn.functional.normalize(image_embeds, dim=-1)
+                text_embeds  = torch.nn.functional.normalize(text_embeds, dim=-1)
+                clip_scores = (image_embeds * text_embeds).sum(dim=-1)  # cosine similarity (-1~1)
+                total_clip += clip_scores.sum().item()
 
                 count += len(batch_prompts)
-                del ref_tensors, gen_tensors, d, output, clip_inputs, clip_outputs
+                del ref_tensors, gen_tensors, d, output, clip_inputs, image_embeds, text_embeds, clip_scores
                 torch.cuda.empty_cache()
 
         # User Latency
