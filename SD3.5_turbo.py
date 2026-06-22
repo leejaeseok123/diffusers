@@ -163,6 +163,12 @@ for T in step_sizes:
                     input_ids=clip_inputs['input_ids'],
                     attention_mask=clip_inputs['attention_mask']
                 )
+                # transformers 5.x: get_image_features/get_text_features가 객체를 반환할 수 있음
+                if hasattr(image_embeds, "pooler_output"):
+                    image_embeds = image_embeds.pooler_output
+                if hasattr(text_embeds, "pooler_output"):
+                    text_embeds = text_embeds.pooler_output
+
                 image_embeds = torch.nn.functional.normalize(image_embeds, dim=-1)
                 text_embeds  = torch.nn.functional.normalize(text_embeds, dim=-1)
                 clip_scores = (image_embeds * text_embeds).sum(dim=-1)  # cosine similarity (-1~1)
