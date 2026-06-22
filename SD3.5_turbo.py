@@ -18,12 +18,12 @@ sys.stdout.reconfigure(line_buffering=True)
 VERSION = "sd3.5-large-turbo"
 MODEL_ID = "stabilityai/stable-diffusion-3.5-large-turbo"
 H, W = 1024, 1024
-BATCH_SIZE_QUALITY = 1   # CLIP, LPIPS
-BATCH_SIZE_LATENCY = 8   # Latency
+BATCH_SIZE_QUALITY = 1   # CLIP, LPIPS용
+BATCH_SIZE_LATENCY = 8   # Latency용
 TOTAL_IMAGES_QUALITY = 1000  # CLIP, LPIPS
 TOTAL_IMAGES_LATENCY = 300   # Latency
 SEED = 42
-REFERENCE_STEP = 100 # LPIPS
+REFERENCE_STEP = 100
 
 step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
