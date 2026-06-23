@@ -25,7 +25,7 @@ TOTAL_IMAGES_LATENCY = 300   # Latency
 SEED = 42
 REFERENCE_STEP = 100
 
-step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
+step_sizes = [4, 6, 8, 10, 50]
 
 base_path            = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
