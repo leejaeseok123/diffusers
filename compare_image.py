@@ -7,7 +7,7 @@ from diffusers import StableDiffusion3Pipeline
 # Configuration
 SEED = 42
 NUM_IMAGES = 10      # 비교할 프롬프트 수
-STEP = 20            # 비교할 step 수 (원하는 step으로 변경)
+STEP = 4            # 비교할 step 수 (원하는 step으로 변경)
 OUTPUT_DIR = "/home/jslee/diffusion_exper/batch_exper/fid/compare_sd35"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
 
