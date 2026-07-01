@@ -16,7 +16,7 @@ from transformers import CLIPProcessor, CLIPModel
 sys.stdout.reconfigure(line_buffering=True)
 
 VERSION = "flux1-dev"
-MODEL_ID = "black-forest-labs/FLUX.1-dev"
+MODEL_ID = "/mnt/ssd1/jslee/huggingface/hub/FLUX.1-dev-full"
 H, W = 1024, 1024
 BATCH_SIZE_QUALITY = 1   # CLIP, LPIPS용
 BATCH_SIZE_LATENCY = 8   # Latency용
