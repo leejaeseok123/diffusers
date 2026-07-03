@@ -29,7 +29,7 @@ SEED = 42
 
 GUIDANCE_SCALE = 3.5
 
-step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
+step_sizes = [4, 6, 8, 12, 14, 16, 18, 20, 30, 40, 50]
 
 base_path = "/home/jslee/diffusion_exper/batch_exper/fid"
 
