@@ -7,36 +7,21 @@ import os
 import gc
 import time
 import numpy as np
-from PIL import Image
 from diffusers import StableDiffusion3Pipeline
-import lpips
-import torchvision.transforms as transforms
-from transformers import CLIPProcessor, CLIPModel
 
 sys.stdout.reconfigure(line_buffering=True)
 
 VERSION = "sd3.5-large"
 MODEL_ID = "stabilityai/stable-diffusion-3.5-large"
 H, W = 1024, 1024
-BATCH_SIZE_QUALITY = 1
 BATCH_SIZE_LATENCY = 4
-TOTAL_IMAGES_QUALITY = 1000  # CLIP, LPIPS
-TOTAL_IMAGES_LATENCY = 300   # Latency
 SEED = 42
-REFERENCE_STEP = 100
 
 step_sizes = [4, 6, 8, 10, 12, 14, 16, 18, 20, 30, 40, 50]
 
 base_path            = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-ref_images_path      = f"{base_path}/ref_{VERSION}_T{REFERENCE_STEP}"
-csv_output_file      = f"{base_path}/results/{VERSION}_metrics.csv"
-
-lpips_transform = transforms.Compose([
-    transforms.Resize((H, W)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-])
+csv_output_file      = f"{base_path}/results/{VERSION}_latency.csv"
 
 def seed_everything(seed):
     random.seed(seed)
@@ -53,21 +38,12 @@ def load_coco_prompts(path, n):
 
 print(f"[INFO] Loading {MODEL_ID}...")
 pipe = StableDiffusion3Pipeline.from_pretrained(
-    MODEL_ID,
-    torch_dtype=torch.bfloat16
+    MODEL_ID, torch_dtype=torch.bfloat16
 ).to("cuda")
 pipe.enable_attention_slicing()
 pipe.set_progress_bar_config(disable=True)
-prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_IMAGES_QUALITY)
 
-print("[INFO] Loading LPIPS model (VGG)...")
-loss_fn_lpips = lpips.LPIPS(net='vgg').cuda()
-loss_fn_lpips.eval()
-
-print("[INFO] Loading CLIP model...")
-clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").cuda()
-clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-clip_model.eval()
+prompt_pool = load_coco_prompts(coco_annotation_path, BATCH_SIZE_LATENCY)
 
 print("[INFO] Warm-up...")
 with torch.inference_mode():
@@ -75,36 +51,13 @@ with torch.inference_mode():
 torch.cuda.synchronize()
 print("[INFO] Warm-up done!\n")
 
-# T=100 기준 이미지 (이미 있으면 스킵)
-if not os.path.exists(ref_images_path) or len(os.listdir(ref_images_path)) < TOTAL_IMAGES_QUALITY:
-    print(f"[INFO] Generating reference images (T={REFERENCE_STEP})...")
-    os.makedirs(ref_images_path, exist_ok=True)
-    seed_everything(SEED)
-    with torch.inference_mode():
-        for i in range(0, TOTAL_IMAGES_QUALITY, BATCH_SIZE_QUALITY):
-            batch_prompts = prompt_pool[i : i + BATCH_SIZE_QUALITY]
-            if not batch_prompts:
-                break
-            generator = torch.Generator(device="cuda").manual_seed(SEED + i)
-            output = pipe(prompt=batch_prompts, num_inference_steps=REFERENCE_STEP, height=H, width=W, generator=generator)
-            for j, img in enumerate(output.images):
-                img.save(os.path.join(ref_images_path, f"{i+j:05d}.png"))
-            del output
-            torch.cuda.empty_cache()
-    print(f"[INFO] Reference images saved: {ref_images_path}\n")
-else:
-    print(f"[INFO] Reference images already exist: {ref_images_path}")
-
-ref_fnames = sorted(os.listdir(ref_images_path))[:TOTAL_IMAGES_QUALITY]
-
 os.makedirs(os.path.dirname(csv_output_file), exist_ok=True)
-if not os.path.exists(csv_output_file):
-    with open(csv_output_file, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Steps", "LPIPS", "CLIP_Score", "User_Latency_sec", "NumImages", "Resolution"])
+with open(csv_output_file, 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(["Steps", "User_Latency_sec", "BatchSize", "Resolution"])
 
-print(f"{'Steps':<8} | {'LPIPS':<10} | {'CLIP':<10} | {'UserLat(s)':<12}")
-print("-" * 48)
+print(f"{'Steps':<8} | {'UserLat(s)':<12}")
+print("-" * 25)
 
 for T in step_sizes:
     seed_everything(SEED)
@@ -112,77 +65,37 @@ for T in step_sizes:
         torch.cuda.empty_cache()
         gc.collect()
 
-        total_lpips = 0.0
-        total_clip  = 0.0
-
-        # CLIP, LPIPS: 1000장 batch=1
-        with torch.inference_mode():
-            for i in range(0, TOTAL_IMAGES_QUALITY, BATCH_SIZE_QUALITY):
-                batch_prompts = prompt_pool[i : i + BATCH_SIZE_QUALITY]
-                batch_fnames  = ref_fnames[i : i + BATCH_SIZE_QUALITY]
-                if not batch_prompts:
-                    break
-
-                generator = torch.Generator(device="cuda").manual_seed(SEED + i)
-                output = pipe(prompt=batch_prompts, num_inference_steps=T, height=H, width=W, generator=generator)
-
-                # LPIPS
-                ref_tensors = torch.stack([
-                    lpips_transform(Image.open(os.path.join(ref_images_path, f)).convert('RGB'))
-                    for f in batch_fnames
-                ]).cuda()
-                gen_tensors = torch.stack([lpips_transform(img) for img in output.images]).cuda()
-                d = loss_fn_lpips(ref_tensors, gen_tensors)
-                total_lpips += d.sum().item()
-
-                # CLIP
-                clip_inputs = clip_processor(
-                    text=batch_prompts, images=output.images,
-                    return_tensors="pt", padding=True, truncation=True
-                ).to("cuda")
-                image_embeds = clip_model.get_image_features(pixel_values=clip_inputs['pixel_values'])
-                text_embeds  = clip_model.get_text_features(input_ids=clip_inputs['input_ids'], attention_mask=clip_inputs['attention_mask'])
-                if hasattr(image_embeds, "pooler_output"): image_embeds = image_embeds.pooler_output
-                if hasattr(text_embeds, "pooler_output"):  text_embeds  = text_embeds.pooler_output
-                image_embeds = torch.nn.functional.normalize(image_embeds, dim=-1)
-                text_embeds  = torch.nn.functional.normalize(text_embeds, dim=-1)
-                total_clip  += (image_embeds * text_embeds).sum(dim=-1).sum().item()
-
-                del ref_tensors, gen_tensors, d, output, clip_inputs, image_embeds, text_embeds
-                torch.cuda.empty_cache()
-
-        # ✅ User Latency: 배치 4장 1번만 측정
-        torch.cuda.empty_cache()
-        gc.collect()
+        # User Latency: 배치 4장 1번만
         torch.cuda.synchronize()
-
         start = time.time()
         with torch.inference_mode():
             generator = torch.Generator(device="cuda").manual_seed(SEED)
-            _ = pipe(prompt=prompt_pool[:BATCH_SIZE_LATENCY], num_inference_steps=T, height=H, width=W, generator=generator)
+            _ = pipe(
+                prompt=prompt_pool[:BATCH_SIZE_LATENCY],
+                num_inference_steps=T,
+                height=H, width=W,
+                generator=generator
+            )
         torch.cuda.synchronize()
         user_latency = time.time() - start
 
-        lpips_score = total_lpips / TOTAL_IMAGES_QUALITY
-        clip_score  = total_clip  / TOTAL_IMAGES_QUALITY
-
-        print(f"{T:<8} | {lpips_score:<10.4f} | {clip_score:<10.4f} | {user_latency:<12.4f}")
+        print(f"{T:<8} | {user_latency:<12.4f}")
 
         with open(csv_output_file, 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([T, lpips_score, clip_score, user_latency, TOTAL_IMAGES_QUALITY, f"{H}x{W}"])
+            writer.writerow([T, user_latency, BATCH_SIZE_LATENCY, f"{H}x{W}"])
 
     except Exception as e:
         if "out of memory" in str(e).lower():
             print(f"{T:<8} | OOM")
             with open(csv_output_file, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([T, "OOM", "OOM", "OOM", TOTAL_IMAGES_QUALITY, f"{H}x{W}"])
+                writer.writerow([T, "OOM", BATCH_SIZE_LATENCY, f"{H}x{W}"])
         else:
             print(f"{T:<8} | ERROR: {e}")
             with open(csv_output_file, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([T, "ERROR", "ERROR", "ERROR", TOTAL_IMAGES_QUALITY, f"{H}x{W}"])
+                writer.writerow([T, "ERROR", BATCH_SIZE_LATENCY, f"{H}x{W}"])
         torch.cuda.empty_cache()
         gc.collect()
 
