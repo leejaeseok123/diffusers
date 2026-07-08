@@ -56,6 +56,8 @@ print("[*] Loading SD1.5 (runwayml/stable-diffusion-v1-5)...")
 pipe = StableDiffusionPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
     torch_dtype=torch.float16,
+    safety_checker=None,          # 필터 모델 로드 안 함
+    requires_safety_checker=False # 필터링 경고 비활성화
 ).to(device)
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
 
