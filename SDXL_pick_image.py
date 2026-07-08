@@ -78,10 +78,13 @@ pick_processor = AutoProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B
 pick_model     = AutoModel.from_pretrained("yuvalkirstain/PickScore_v1").to(device).eval()
 
 # -----------------------
-# ImageReward 모델 로드
+# ImageReward 모델 로드 (로컬 경로 지정)
 # -----------------------
-print("[*] Loading ImageReward...")
-reward_model = RM.load("ImageReward-v1.0").to(device)
+print("[*] Loading ImageReward from local path...")
+local_weights_dir = "/home/jslee/diffusion_exper/weights/ImageReward"
+
+# download_root에 파일이 있으면 다운로드를 건너뛰고 해당 파일들을 로드합니다.
+reward_model = RM.load("ImageReward-v1.0", download_root=local_weights_dir).to(device)
 print("[*] 평가 모델 로드 완료!\n")
 
 # -----------------------
