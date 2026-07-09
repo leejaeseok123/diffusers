@@ -52,9 +52,9 @@ prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 # -----------------------
 # SD2.1 모델 로드
 # -----------------------
-print("[*] Loading SD2.1 (stabilityai/stable-diffusion-2-1)...")
+print("[*] Loading SD2.1 (Manojb--stable-diffusion-2-1-base)...")
 pipe = StableDiffusionPipeline.from_pretrained(
-    "stabilityai/stable-diffusion-2-1",
+    "Manojb--stable-diffusion-2-1-base",
     torch_dtype=torch.float16,
 ).to(device)
 pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
