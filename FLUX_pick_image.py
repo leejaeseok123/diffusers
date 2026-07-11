@@ -14,15 +14,14 @@ import ImageReward as RM
 sys.stdout.reconfigure(line_buffering=True)
 
 # -----------------------
-# [확인 완료] 로컬 모델 경로 설정
+# [자동 캐시 추적] 로컬 캐시 모델 ID 설정
 # -----------------------
-# 허브 캐시 디렉토리 기준 절대 경로 매핑
-HUB_BASE_PATH = "/mnt/ssd1/jslee/huggingface/hub"
-
-FLUX_LOCAL_PATH = os.path.join(HUB_BASE_PATH, "FLUX.1-dev-full") 
-PICK_PROC_LOCAL_PATH = os.path.join(HUB_BASE_PATH, "models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K")
-PICK_MODEL_LOCAL_PATH = os.path.join(HUB_BASE_PATH, "models--yuvalkirstain--PickScore_v1")
+# 코드는 순정 ID를 유지하되, local_files_only=True 옵션을 주어 
+# 외부 네트워크 다운로드 없이 HF_HOME 내부 캐시를 알아서 맵핑하도록 합니다.
 # -----------------------
+FLUX_MODEL_ID = "black-forest-labs/FLUX.1-dev"
+PICK_PROC_ID  = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+PICK_MODEL_ID = "yuvalkirstain/PickScore_v1"
 
 # 설정 (FLUX)
 # -----------------------
@@ -60,13 +59,13 @@ def load_coco_prompts(path, n):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# FLUX 모델 로드 (로컬 경로)
+# FLUX 모델 로드 (로컬 캐시 강제 탐색)
 # -----------------------
-print(f"[*] Loading FLUX from local path: {FLUX_LOCAL_PATH}...")
+print(f"[*] Loading FLUX ({FLUX_MODEL_ID})...")
 pipe = FluxPipeline.from_pretrained(
-    FLUX_LOCAL_PATH,
+    FLUX_MODEL_ID,
     torch_dtype=torch.bfloat16,
-    local_files_only=True
+    local_files_only=True # 인터넷 다운로드 차단 및 캐시 우선 로드
 ).to(device)
 
 pipe.enable_attention_slicing()
@@ -81,11 +80,11 @@ except ImportError:
 pipe.set_progress_bar_config(disable=True)
 
 # -----------------------
-# PickScore 모델 로드 (로컬 경로)
+# PickScore 모델 로드 (로컬 캐시 강제 탐색)
 # -----------------------
-print(f"[*] Loading PickScore from local path...")
-pick_processor = AutoProcessor.from_pretrained(PICK_PROC_LOCAL_PATH, local_files_only=True)
-pick_model     = AutoModel.from_pretrained(PICK_MODEL_LOCAL_PATH, local_files_only=True).to(device).eval()
+print(f"[*] Loading PickScore ({PICK_PROC_ID} / {PICK_MODEL_ID})...")
+pick_processor = AutoProcessor.from_pretrained(PICK_PROC_ID, local_files_only=True)
+pick_model     = AutoModel.from_pretrained(PICK_MODEL_ID, local_files_only=True).to(device).eval()
 
 # -----------------------
 # ImageReward 모델 로드 (로컬 경로 지정)
