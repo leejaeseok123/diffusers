@@ -14,6 +14,16 @@ import ImageReward as RM
 sys.stdout.reconfigure(line_buffering=True)
 
 # -----------------------
+# [확인 완료] 로컬 모델 경로 설정
+# -----------------------
+# 허브 캐시 디렉토리 기준 절대 경로 매핑
+HUB_BASE_PATH = "/mnt/ssd1/jslee/huggingface/hub"
+
+FLUX_LOCAL_PATH = os.path.join(HUB_BASE_PATH, "FLUX.1-dev-full") 
+PICK_PROC_LOCAL_PATH = os.path.join(HUB_BASE_PATH, "models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K")
+PICK_MODEL_LOCAL_PATH = os.path.join(HUB_BASE_PATH, "models--yuvalkirstain--PickScore_v1")
+# -----------------------
+
 # 설정 (FLUX)
 # -----------------------
 SEED = 42
@@ -50,12 +60,13 @@ def load_coco_prompts(path, n):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# FLUX 모델 로드
+# FLUX 모델 로드 (로컬 경로)
 # -----------------------
-print("[*] Loading FLUX (black-forest-labs/FLUX.1-dev)...")
+print(f"[*] Loading FLUX from local path: {FLUX_LOCAL_PATH}...")
 pipe = FluxPipeline.from_pretrained(
-    "black-forest-labs/FLUX.1-dev",
+    FLUX_LOCAL_PATH,
     torch_dtype=torch.bfloat16,
+    local_files_only=True
 ).to(device)
 
 pipe.enable_attention_slicing()
@@ -70,11 +81,11 @@ except ImportError:
 pipe.set_progress_bar_config(disable=True)
 
 # -----------------------
-# PickScore 모델 로드 (CLIP-H 기반)
+# PickScore 모델 로드 (로컬 경로)
 # -----------------------
-print("[*] Loading PickScore...")
-pick_processor = AutoProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
-pick_model     = AutoModel.from_pretrained("yuvalkirstain/PickScore_v1").to(device).eval()
+print(f"[*] Loading PickScore from local path...")
+pick_processor = AutoProcessor.from_pretrained(PICK_PROC_LOCAL_PATH, local_files_only=True)
+pick_model     = AutoModel.from_pretrained(PICK_MODEL_LOCAL_PATH, local_files_only=True).to(device).eval()
 
 # -----------------------
 # ImageReward 모델 로드 (로컬 경로 지정)
@@ -117,7 +128,7 @@ def calc_imagereward(images, prompts):
 # -----------------------
 print("[*] Warm-up 중...")
 with torch.inference_mode():
-    _ = pipe(prompt_pool[:2], num_inference_steps=5, height=H, width=W)
+    _ = pipe(prompt_pool[:batch_size], num_inference_steps=5, height=H, width=W)
 torch.cuda.synchronize()
 print("[*] Warm-up 완료!\n")
 
