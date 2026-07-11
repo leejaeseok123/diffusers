@@ -14,12 +14,13 @@ import ImageReward as RM
 sys.stdout.reconfigure(line_buffering=True)
 
 # -----------------------
-# [자동 캐시 추적] 로컬 캐시 모델 ID 설정
+# [최종 경로 매핑] 모델별 최적 경로 설정
 # -----------------------
-# 코드는 순정 ID를 유지하되, local_files_only=True 옵션을 주어 
-# 외부 네트워크 다운로드 없이 HF_HOME 내부 캐시를 알아서 맵핑하도록 합니다.
-# -----------------------
-FLUX_MODEL_ID = "black-forest-labs/FLUX.1-dev"
+# FLUX는 캐시 형태가 아닌 독자적인 폴더 구조이므로 디스크 절대 경로를 직접 지정합니다.
+FLUX_MODEL_ID = "/mnt/ssd1/jslee/huggingface/hub/FLUX.1-dev-full"
+
+# PickScore 모델들은 캐시 형태(models--)로 보존되어 있으므로 순정 ID를 유지합니다.
+# (터미널에서 export HF_HOME=... 을 선언해 주면 하위 해시 경로를 알아서 찾아 들어갑니다.)
 PICK_PROC_ID  = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
 PICK_MODEL_ID = "yuvalkirstain/PickScore_v1"
 
@@ -59,13 +60,13 @@ def load_coco_prompts(path, n):
 prompt_pool = load_coco_prompts(coco_annotation_path, total_images)
 
 # -----------------------
-# FLUX 모델 로드 (로컬 캐시 강제 탐색)
+# FLUX 모델 로드 (절대 경로 지정)
 # -----------------------
-print(f"[*] Loading FLUX ({FLUX_MODEL_ID})...")
+print(f"[*] Loading FLUX from local path: {FLUX_MODEL_ID}...")
 pipe = FluxPipeline.from_pretrained(
     FLUX_MODEL_ID,
     torch_dtype=torch.bfloat16,
-    local_files_only=True # 인터넷 다운로드 차단 및 캐시 우선 로드
+    local_files_only=True # 외부 인터넷 및 오동작 허브 요청 차단
 ).to(device)
 
 pipe.enable_attention_slicing()
@@ -80,7 +81,7 @@ except ImportError:
 pipe.set_progress_bar_config(disable=True)
 
 # -----------------------
-# PickScore 모델 로드 (로컬 캐시 강제 탐색)
+# PickScore 모델 로드 (로컬 캐시 자동 매핑)
 # -----------------------
 print(f"[*] Loading PickScore ({PICK_PROC_ID} / {PICK_MODEL_ID})...")
 pick_processor = AutoProcessor.from_pretrained(PICK_PROC_ID, local_files_only=True)
