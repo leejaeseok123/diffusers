@@ -27,7 +27,7 @@ SEED = 42
 GUIDANCE_SCALE = 3.5
 REFERENCE_STEP = 100  # LPIPS 기준점 스텝
 
-step_sizes = [10, 30, 40, 50]
+step_sizes = [30, 40, 50]
 
 base_path = "/home/jslee/diffusion_exper/batch_exper/fid"
 coco_annotation_path = (
