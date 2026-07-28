@@ -25,7 +25,7 @@ GUIDANCE_SCALE_FLUX = 3.5
 GUIDANCE_SCALE_TURBO = 0.0  # SD3.5-Turbo 기본값 CFG=0.0
 
 # 지정된 step 리스트
-step_sizes = [4, 6, 8, 12, 14, 16, 18, 20, 30, 40, 50]
+step_sizes = [10]
 
 base_path = "/home/jslee/diffusion_exper/batch_exper/fid"
 
