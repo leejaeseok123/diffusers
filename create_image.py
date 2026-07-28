@@ -10,7 +10,7 @@ from diffusers import StableDiffusionPipeline, StableDiffusion3Pipeline, DDIMSch
 # ==========================================
 SEED = 42
 NUM_PROMPTS = 3                     # 비교할 프롬프트 수 (3개)
-STEPS = [10, 20, 30]                # 비교할 Denoising Steps
+STEPS = [10, 20, 30, 40]            # 비교할 Denoising Steps (40 추가)
 OUTPUT_DIR = "/home/jslee/diffusion_exper/batch_exper/fid/compare_steps"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
 
@@ -86,7 +86,7 @@ for model_cfg in MODELS:
     print(f"[INFO] {m_name} Pipeline Cleared.")
 
 # ==========================================
-# 비교 그리드 이미지 생성 (2행 3열 구조)
+# 비교 그리드 이미지 생성 (2행 4열 구조)
 # ==========================================
 print("\n[INFO] Generating Step-Comparison Grids...")
 
@@ -104,7 +104,7 @@ except:
     font_prompt = ImageFont.load_default()
 
 for p_idx, prompt in enumerate(prompts):
-    n_cols = len(STEPS)  # 3 (Steps: 10, 20, 30)
+    n_cols = len(STEPS)  # 4 (Steps: 10, 20, 30, 40)
     n_rows = len(MODELS) # 2 (v2.1, v3.5)
 
     img_w = n_cols * (CELL_W + PADDING) + PADDING
@@ -125,7 +125,7 @@ for p_idx, prompt in enumerate(prompts):
             x = PADDING + c_idx * (CELL_W + PADDING)
             y = PROMPT_H + r_idx * (LABEL_H + CELL_H + PADDING)
 
-            # 상단 라벨 (예: "v2.1 | Step: 10")
+            # 상단 라벨 (예: "v2.1 | Step: 40")
             draw.rectangle([x, y, x + CELL_W, y + LABEL_H], fill=(50, 50, 80))
             draw.text((x + 10, y + 10), f"{m_name} | Step {step}", fill=(255, 255, 100), font=font_label)
 
