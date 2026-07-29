@@ -63,7 +63,7 @@ coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014
 base_path = "/home/jslee/diffusion_exper/batch_exper/fid"
 
 BATCH_SIZE = 1
-NUM_BENCH_RUNS = 5  # 스텝당 평균 계산을 위한 반복 횟수
+NUM_BENCH_RUNS = 1  # 스텝당 평균 계산을 위한 반복 횟수
 step_sizes = list(range(10, 41))  # 10부터 40까지 1스텝 단위
 
 # -----------------------
