@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.ticker import FixedLocator
 
 # 폰트 및 글로벌 스타일 설정
 plt.rcParams["font.family"] = "Times New Roman"
@@ -25,7 +26,7 @@ styles = {
     'FLUX.1':       {'color': '#d62728', 'marker': '*'}
 }
 
-# --- Latency (s) ---
+# --- Data ---
 latency_data = {
     'SD1.5':        [0.130, 0.188, 0.237, 0.286, 0.336, 0.385, 0.434, 0.486, 0.534, 0.776, 1.026, 1.259],
     'SD2.1':        [0.328, 0.429, 0.538, 0.643, 0.755, 0.866, 0.978, 1.081, 1.198, 1.751, 2.304, 2.864],
@@ -36,7 +37,6 @@ latency_data = {
     'FLUX.1':       [4.291, 6.256, 8.181, 10.216, 11.986, 13.965, 16.031, 18.036, 20.327, 29.972, 39.663, 49.375]
 }
 
-# --- CLIP ---
 clip_data = {
     'SD1.5':        [0.290, 0.309, 0.311, 0.312, 0.313, 0.314, 0.313, 0.314, 0.315, 0.314, 0.314, 0.313],
     'SD2.1':        [0.281, 0.299, 0.306, 0.309, 0.310, 0.309, 0.311, 0.311, 0.311, 0.312, 0.312, 0.312],
@@ -47,7 +47,6 @@ clip_data = {
     'FLUX.1':       [0.302, 0.311, 0.313, 0.313, 0.313, 0.312, 0.312, 0.312, 0.312, 0.311, 0.310, 0.310]
 }
 
-# --- LPIPS ---
 lpips_data = {
     'SD1.5':        [0.653, 0.582, 0.528, 0.496, 0.464, 0.432, 0.411, 0.393, 0.350, 0.306, 0.217, 0.169],
     'SD2.1':        [0.634, 0.559, 0.501, 0.456, 0.425, 0.400, 0.380, 0.364, 0.322, 0.281, 0.191, 0.148],
@@ -58,7 +57,6 @@ lpips_data = {
     'FLUX.1':       [0.631, 0.593, 0.558, 0.536, 0.514, 0.494, 0.475, 0.458, 0.439, 0.369, 0.312, 0.275]
 }
 
-# --- PickScore ---
 pickscore_data = {
     'SD1.5':        [19.699, 20.562, 20.927, 21.104, 21.195, 21.276, 21.310, 21.349, 21.381, 21.438, 21.460, 21.472],
     'SD2.1':        [19.965, 20.813, 21.193, 21.389, 21.481, 21.557, 21.605, 21.639, 21.691, 21.739, 21.789, 21.792],
@@ -69,7 +67,6 @@ pickscore_data = {
     'FLUX.1':       [21.283, 22.431, 22.735, 22.896, 22.943, 22.977, 22.984, 23.007, 23.000, 23.006, 22.981, 22.974]
 }
 
-# --- ImageReward ---
 imagereward_data = {
     'SD1.5':        [-1.146, -0.381, -0.141, -0.001, 0.061, 0.112, 0.114, 0.151, 0.151, 0.185, 0.199, 0.207],
     'SD2.1':        [-0.894, -0.171,  0.085,  0.209, 0.257, 0.297, 0.332, 0.357, 0.369, 0.395, 0.416, 0.422],
@@ -84,15 +81,13 @@ imagereward_data = {
 # 2. Grid Layout Setup
 # ==========================================================
 
-fig = plt.figure(figsize=(9.5, 4.2))
+fig = plt.figure(figsize=(7.0, 3.2))
 
-# Outer GridSpec: [Left (Latency), Right (2x2 Metrics)]
-gs_outer = gridspec.GridSpec(1, 2, width_ratios=[1.0, 2.1], wspace=0.25)
+gs_outer = gridspec.GridSpec(1, 2, width_ratios=[1.0, 2.1], wspace=0.15)
 
 ax_lat = fig.add_subplot(gs_outer[0])
 
-# Inner GridSpec for right side (2x2 layout)
-gs_right = gridspec.GridSpecFromSubplotSpec(2, 2, subplot_spec=gs_outer[1], wspace=0.25, hspace=0.32)
+gs_right = gridspec.GridSpecFromSubplotSpec(2, 2, subplot_spec=gs_outer[1], wspace=0.18, hspace=0.32)
 
 ax_clip  = fig.add_subplot(gs_right[0, 0])
 ax_lpips = fig.add_subplot(gs_right[0, 1])
@@ -100,66 +95,92 @@ ax_pick  = fig.add_subplot(gs_right[1, 0])
 ax_img   = fig.add_subplot(gs_right[1, 1])
 
 subplots = [
-    (ax_lat, latency_data, "Latency (s)", (-2, 53)),
-    (ax_clip, clip_data, "CLIP", (0.23, 0.335)),
-    (ax_lpips, lpips_data, "LPIPS", (0.12, 0.8)),
-    (ax_pick, pickscore_data, "PickScore", (17, 24)),
-    (ax_img, imagereward_data, "ImageReward", (-2.5, 1.3))
+    (ax_lat, latency_data, "Latency (s)", (-2, 53), [0, 10, 20, 30, 40, 50]),
+    (ax_clip, clip_data, "CLIP", (0.235, 0.335), [0.24, 0.26, 0.28, 0.30, 0.32]),
+    (ax_lpips, lpips_data, "LPIPS", (0.15, 0.78), [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]),
+    (ax_pick, pickscore_data, "PickScore", (17.5, 23.5), [18, 19, 20, 21, 22, 23]),
+    (ax_img, imagereward_data, "ImageReward", (-2.3, 1.2), [-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0])
 ]
 
-x_ticks = [4, 8, 12, 16, 20, 30, 40, 50]
+x_major_ticks = [4, 8, 12, 16, 20, 30, 40, 50]
+x_minor_ticks = [6, 10, 14, 18]
 
 # ==========================================================
 # 3. Drawing Subplots
 # ==========================================================
 
-for ax, data_dict, ylabel, ylim in subplots:
+for ax, data_dict, ylabel, ylim, yticks in subplots:
     for model in ordered_models:
         ax.plot(
             steps, data_dict[model],
             color=styles[model]['color'],
             marker=styles[model]['marker'],
-            markersize=3.5,
-            linewidth=1.0,
+            markersize=2.8,
+            linewidth=0.7,
             markerfacecolor='white',
-            markeredgewidth=0.8,
+            markeredgewidth=0.7,
             label=model
         )
     
-    # [수정] 라벨 폰트 크기 7
-    ax.set_xlabel("Time Step", fontsize=7)
-    ax.set_ylabel(ylabel, fontsize=7)
+    ax.set_xlabel("Time Step", fontsize=7, labelpad=3.0)
+    ax.set_ylabel(ylabel, fontsize=7, labelpad=2.0)
     
-    ax.set_xticks(x_ticks)
+    ax.set_xticks(x_major_ticks)
+    ax.xaxis.set_minor_locator(FixedLocator(x_minor_ticks))
+    ax.set_yticks(yticks)
     ax.set_xlim(2, 52)
     ax.set_ylim(ylim)
     
-    # [수정] Tick 숫자 폰트 크기 6
-    ax.tick_params(direction="in", which="both", labelsize=6, length=2.5, top=True, right=True)
+    ax.tick_params(
+        direction="in",
+        which="major",
+        labelsize=6,
+        length=3.0,
+        pad=2,
+        top=False,
+        right=False
+    )
+    ax.tick_params(
+        direction="in",
+        which="minor",
+        length=3.0,
+        top=False,
+        right=False
+    )
     ax.grid(False)
 
 # ==========================================================
-# 4. Top Legend
+# 4. Top Legend Layout (동적 정밀 위치 지정)
 # ==========================================================
 
+plt.subplots_adjust(top=0.86, bottom=0.12, left=0.06, right=0.98)
+
+# 실제 그릴 좌표 위치 계산을 위한 draw
+fig.canvas.draw()
+
+# 왼쪽 서브플롯 축과 오른쪽 서브플롯 축 위치 파악
+pos_left = ax_lat.get_position()
+pos_right = ax_lpips.get_position()
+
+x_start = pos_left.x0
+x_width = pos_right.x1 - pos_left.x0
+
 handles, labels = ax_lat.get_legend_handles_labels()
+
 fig.legend(
     handles, labels,
-    loc="upper center",
-    bbox_to_anchor=(0.505, 0.98),
+    loc="lower left",
+    bbox_to_anchor=(x_start, 0.89, x_width, 0.08),
+    mode="expand",
     ncol=7,
-    fontsize=6,  # [수정] 범례 폰트 크기 6
+    fontsize=6.5,
     frameon=True,
     edgecolor="black",
     fancybox=False,
-    handletextpad=0.3,
-    columnspacing=0.8,
+    handletextpad=0.2,
     borderpad=0.3
 )
 
-plt.subplots_adjust(top=0.89, bottom=0.10, left=0.06, right=0.98)
-
 # 저장
-plt.savefig("figure_all.pdf", bbox_inches="tight")
-plt.savefig("figure_all.png", dpi=300, bbox_inches="tight")
-print("저장 완료: figure_font_fixed.pdf / .png")
+plt.savefig("figure_perfect_align.pdf", bbox_inches="tight")
+plt.savefig("figure_perfect_align.png", dpi=300, bbox_inches="tight")
