@@ -1,15 +1,5 @@
 """
-PaniniServe — 실제 GPU 실행 스크립트
-======================================
-주신 SD v2.1 스케일링 벤치마크 스크립트의 구조(재현성 고정, GPU 모니터링 스레드,
-warm-up, CSV 출력)를 그대로 따라서, PaniniServe 스케줄러가 결정한 스케줄대로
-실제 SDv2.1 / SDv3.5-Medium을 호출해 COCO 프롬프트로 이미지를 생성합니다.
-
-흐름: (1) 요청 300개 생성(포아송 도착 + accuracy/model 랜덤 배정)
-      (2) PaniniServe 스케줄러가 "시뮬레이션"으로 순서/모델/step을 미리 결정
-      (3) 그 결정대로 실제 GPU에서 하나씩 실행 (원래 도착시각에 맞춰 sleep,
-          real-time replay로 실제 큐잉/부하를 재현)
-      (4) 요청마다 CSV 한 줄 기록 (latency, SLO 만족 여부, GPU 상태 등)
+PaniniServe — 실제 GPU 실행 스크립트 (SLO 및 Throughput 종합 리포팅 적용)
 """
 
 import sys
@@ -26,13 +16,14 @@ from typing import List, Optional
 
 import torch
 import numpy as np
+import pandas as pd
 from diffusers import StableDiffusionPipeline, StableDiffusion3Pipeline, DDIMScheduler
 from pynvml import *
 
 sys.stdout.reconfigure(line_buffering=True)
 
 # =====================================================================
-# 재현성 고정 (참고 스크립트와 동일)
+# 재현성 고정
 # =====================================================================
 SEED = 42
 random.seed(SEED)
@@ -41,7 +32,7 @@ torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 
 # =====================================================================
-# GPU 모니터링 (참고 스크립트와 동일한 클래스)
+# GPU 모니터링
 # =====================================================================
 nvmlInit()
 handle = nvmlDeviceGetHandleByIndex(0)
@@ -83,10 +74,10 @@ monitor = GPUUtilMonitor(handle)
 # =====================================================================
 device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "PaniniServe_medium.csv"
+csv_output_file = "PaniniServe_low.csv"
 
 TOTAL_REQUESTS = 300
-LOAD_LEVEL = "medium"          # "low" | "medium" | "high" -- 돌릴 때마다 바꿔서 실행
+LOAD_LEVEL = "low"          # "low" | "medium" | "high" -- 실행 시 조절
 WINDOW_SEC = 60.0
 
 RES = {"small": (768, 768), "large": (1024, 1024)}   # SDv2.1 / SDv3.5-Medium 해상도
@@ -104,11 +95,17 @@ MODEL_TYPES = ["small", "large", "auto"]
 ACCURACY_LEVELS = ["high", "medium", "low"]
 INITIAL_MODEL = "small"
 
-# --- Model Profile (사전 프로파일링 값 -- 스케줄링 "결정"에만 쓰이는 예측치.
-#     실제 측정치는 실행 후 CSV의 System_Latency_s 컬럼에 별도로 기록됨) ---
+# --- Accuracy SLO용 부하 조건별 최소 요구 Step 기준 ---
+MIN_STEPS_THRESHOLD = {
+    "low": 10,
+    "medium": 20,
+    "high": 30
+}
+
+# --- Model Profile ---
 TIME_PER_STEP = {"small": 0.08093, "large": 0.39624}
 BASE_OVERHEAD = {"small": 0.09463, "large": 0.27221}
-SWITCH_TIME = {("small", "large"): 1.90, ("large", "small"): 6.31}
+SWITCH_TIME = {("small", "large"): 2.30, ("large", "small"): 4.50}
 
 
 def exec_time(model: str, steps: float) -> float:
@@ -147,8 +144,8 @@ class Req:
     deadline: float
     assigned_model: Optional[str] = None
     assigned_steps: Optional[int] = None
-    start: Optional[float] = None          # 예측(시뮬레이션) 시작시각 -> 실행 후 실측치로 덮어씀
-    end: Optional[float] = None            # 예측 종료시각 -> 실측치로 덮어씀
+    start: Optional[float] = None          # 실측치로 덮어씀
+    end: Optional[float] = None            # 실측치로 덮어씀
     dropped: bool = False
     switched: bool = False
     status: Optional[str] = None
@@ -161,7 +158,7 @@ class Req:
 
 
 # =====================================================================
-# 데이터 로드 -- 참고 스크립트와 동일한 방식(중복 제거+정렬)으로 COCO 프롬프트 300개 확보
+# 데이터 로드
 # =====================================================================
 
 def load_coco_prompts(json_path: str, num_samples: int) -> List[str]:
@@ -174,9 +171,6 @@ def load_coco_prompts(json_path: str, num_samples: int) -> List[str]:
 
 
 def generate_requests(load_level: str, prompt_pool: List[str]) -> List[Req]:
-    """포아송 도착 + model/accuracy 랜덤 배정으로 요청 300개 생성.
-    prompt_pool은 load_coco_prompts()로 미리 로드해둔 걸 그대로 받아서,
-    요청 <-> 프롬프트를 중복 없이 1:1로 섞어서 배정한다."""
     prompts = prompt_pool.copy()
     random.shuffle(prompts)
 
@@ -204,8 +198,7 @@ def generate_requests(load_level: str, prompt_pool: List[str]) -> List[Req]:
 
 
 # =====================================================================
-# PaniniServe 스케줄러 (시뮬레이션으로 순서/모델/step을 미리 결정)
-#   -- 로직은 panini_serve.py와 동일, 실제 실행 전에 "계획"만 세우는 단계
+# PaniniServe 스케줄러 (시뮬레이션)
 # =====================================================================
 
 def order_batch(batch: List[Req], current_model: str) -> List[Req]:
@@ -253,9 +246,6 @@ def total_window_time(queue, current_model, use_assigned=False) -> float:
 
 
 def plan_schedule(reqs: List[Req]) -> List[Req]:
-    """PaniniServe 윈도우 스케줄링을 시뮬레이션으로 돌려서, 각 요청의
-    assigned_model/assigned_steps/처리순서(=이 함수가 반환하는 리스트 순서)와
-    drop 여부까지 전부 미리 "계획"만 세운다. 아직 실제 GPU 호출은 하지 않는다."""
     pending = sorted(reqs, key=lambda r: r.arrival)
     waiting: List[Req] = []
     current_model = INITIAL_MODEL
@@ -312,7 +302,6 @@ def plan_schedule(reqs: List[Req]) -> List[Req]:
                 planned.append(r)
                 total = total_window_time(queue, current_model, use_assigned=True)
 
-        # (예측 start/end는 여기서 채워두지만, 실제 실행 후 real_start/real_end로 덮어씀)
         t, prev = start_t, current_model
         for r in queue:
             sc = switch_cost(prev, r.assigned_model)
@@ -332,15 +321,12 @@ def plan_schedule(reqs: List[Req]) -> List[Req]:
         planned.extend(queue)
         window_start = window_end
 
-    # rid 순서가 아니라 "실제로 처리되는 순서"로 정렬된 상태로 반환
-    # (drop된 요청은 drop된 시점 순서로 섞여 들어가 있으므로, 실행 시점엔
-    #  arrival 순서를 기준으로 다시 정렬해서 재현하는 게 자연스러움 -> 아래서 처리)
     planned.sort(key=lambda r: (r.dropped, r.start if r.start is not None else r.arrival))
     return planned
 
 
 # =====================================================================
-# 모델 로드 (참고 스크립트 스타일: DDIM + attention slicing + xformers, 해상도別)
+# 모델 로드 및 Warm-up
 # =====================================================================
 
 def load_pipelines():
@@ -367,8 +353,6 @@ def load_pipelines():
 
 
 def switch_to(pipes: dict, model_name: str, current_on_gpu: Optional[str]) -> float:
-    """model_name을 GPU로 올리고, 이전에 GPU에 있던 다른 모델은 CPU로 내린다.
-    실제 걸린 스위칭 시간(초)을 반환 -- 이게 SWITCH_TIME 실측치를 얻는 방법이다."""
     if current_on_gpu == model_name:
         return 0.0
     t0 = time.time()
@@ -392,15 +376,16 @@ def warm_up(pipes: dict, prompt_pool: List[str]):
         H, W = RES["large"]
         _ = pipes["large"](prompt_pool[:2], num_inference_steps=20, height=H, width=W)
     torch.cuda.synchronize()
-    print("[*] Warm-up 완료! 실험 시작합니다.\n")
+
+    print("[*] Warm-up 완료!\n")
 
 
 # =====================================================================
-# 실제 GPU 실행 (real-time replay: 원래 도착시각에 맞춰 sleep 하며 재현)
+# 실제 GPU 실행 (Real-time Replay 및 종합 리포팅)
 # =====================================================================
 
 def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
-                        save_dir: Optional[str] = None):
+                       save_dir: Optional[str] = None):
     current_on_gpu = None
     t0 = time.time()
 
@@ -409,20 +394,21 @@ def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
         writer.writerow([
             "RID", "Model", "Steps", "Arrival_s", "Deadline_s",
             "Real_Start_s", "Real_End_s", "System_Latency_s",
-            "Switch_Time_s", "Status", "Overage_pct",
-            "Peak_Mem_GB", "GPU_Util_%",
+            "Switch_Time_s", "Status", "Latency_SLO_Met", "Accuracy_SLO_Met",
+            "Overage_pct", "Peak_Mem_GB", "GPU_Util_%"
         ])
 
-    print(f"{'RID':<5} | {'Model':<6} | {'Steps':<5} | {'Latency_s':<10} | {'Switch_s':<9} | {'Status':<8} | {'GPU%':<6}")
-    print("-" * 70)
+    print(f"{'RID':<5} | {'Model':<6} | {'Steps':<5} | {'System_Lat_s':<12} | {'Switch_s':<9} | {'Status':<8} | {'GPU%':<6}")
+    print("-" * 75)
 
     for r in plan:
         if r.dropped:
-            # drop된 요청도 CSV엔 남겨서 최종 SLO 계산에 포함시킴 (latency/gpu 정보는 없음)
             with open(csv_output_file, "a", newline="") as f:
-                csv.writer(f).writerow([r.rid, r.assigned_model, r.assigned_steps,
-                                          r.arrival, r.deadline, "", "", "", "",
-                                          "dropped", "", "", ""])
+                csv.writer(f).writerow([
+                    r.rid, r.assigned_model, r.assigned_steps,
+                    r.arrival, r.deadline, "", "", "", "",
+                    "dropped", False, False, "", "", ""
+                ])
             continue
 
         if realtime:
@@ -430,8 +416,10 @@ def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
             if wait > 0:
                 time.sleep(wait)
 
+        # 기존 메모리 및 GC 정리 유지
         torch.cuda.empty_cache()
         gc.collect()
+
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
 
@@ -453,7 +441,15 @@ def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
         peak_mem = torch.cuda.max_memory_allocated() / 1024**3
 
         r.start, r.end = real_start, real_end
-        r.status = "met" if r.end <= r.deadline else "soft"
+        
+        # --- 지표 계산 ---
+        system_latency = real_end - r.arrival   # 전체 대기 포함 latency
+        latency_slo_met = r.end <= r.deadline    # Latency SLO (met만 True)
+        
+        min_required_step = MIN_STEPS_THRESHOLD.get(LOAD_LEVEL, 20)
+        accuracy_slo_met = r.assigned_steps >= min_required_step  # Accuracy SLO
+
+        r.status = "met" if latency_slo_met else "soft"
         if r.status == "soft":
             r.overage_pct = (r.end - r.deadline) / r.latency_slo * 100.0
 
@@ -461,19 +457,76 @@ def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
             os.makedirs(save_dir, exist_ok=True)
             image.save(os.path.join(save_dir, f"req_{r.rid:03d}.png"))
 
-        system_latency = real_end - real_start
         print(f"{r.rid:<5} | {r.assigned_model:<6} | {r.assigned_steps:<5} | "
-              f"{system_latency:<10.4f} | {switch_time:<9.4f} | {r.status:<8} | {gpu_util:<6.1f}")
+              f"{system_latency:<12.4f} | {switch_time:<9.4f} | {r.status:<8} | {gpu_util:<6.1f}")
 
         with open(csv_output_file, "a", newline="") as f:
             csv.writer(f).writerow([
                 r.rid, r.assigned_model, r.assigned_steps, r.arrival, r.deadline,
                 real_start, real_end, system_latency, switch_time,
-                r.status, r.overage_pct or "", peak_mem, gpu_util,
+                r.status, latency_slo_met, accuracy_slo_met,
+                r.overage_pct or "", peak_mem, gpu_util
             ])
 
-    print(f"\n[✔] 완료 -> {os.path.abspath(csv_output_file)}")
+    exp_total_time = time.time() - t0
+    print(f"\n[✔] 실행 완료 -> {os.path.abspath(csv_output_file)}")
 
+    # =====================================================================
+    # 최종 결과 종합 분석, 터미널 출력 및 요약 CSV 저장
+    # =====================================================================
+    df = pd.read_csv(csv_output_file)
+    total_reqs = len(df)
+    completed_reqs = len(df[df["Status"] != "dropped"])
+
+    # 1. Throughput
+    req_throughput = completed_reqs / exp_total_time
+
+    # 2. Latency SLO
+    latency_met_cnt = (df["Latency_SLO_Met"] == True).sum()
+    latency_slo_rate = (latency_met_cnt / total_reqs) * 100
+    p50_lat = df["System_Latency_s"].dropna().quantile(0.50)
+    p95_lat = df["System_Latency_s"].dropna().quantile(0.95)
+    p99_lat = df["System_Latency_s"].dropna().quantile(0.99)
+
+    # 3. Accuracy SLO
+    acc_met_cnt = (df["Accuracy_SLO_Met"] == True).sum()
+    acc_slo_rate = (acc_met_cnt / total_reqs) * 100
+
+    # --- 콘솔 출력 ---
+    print("\n" + "=" * 65)
+    print(f"       PaniniServe Performance Summary Report ({LOAD_LEVEL.upper()})")
+    print("=" * 65)
+    print(f" [Throughput]")
+    print(f"  - Total Elapsed Time     : {exp_total_time:.2f} s")
+    print(f"  - Request Throughput     : {req_throughput:.3f} req/s")
+    print("-" * 65)
+    print(f" [Latency SLO]")
+    print(f"  - Latency SLO Attainment : {latency_slo_rate:.2f}% ({latency_met_cnt}/{total_reqs})")
+    print(f"  - System Latency P50     : {p50_lat:.3f} s")
+    print(f"  - System Latency P95     : {p95_lat:.3f} s")
+    print(f"  - System Latency P99     : {p99_lat:.3f} s")
+    print("-" * 65)
+    print(f" [Accuracy SLO]")
+    print(f"  - Min Required Steps     : {MIN_STEPS_THRESHOLD.get(LOAD_LEVEL, 20)} steps")
+    print(f"  - Accuracy SLO Attainment: {acc_slo_rate:.2f}% ({acc_met_cnt}/{total_reqs})")
+    print("=" * 65 + "\n")
+
+    # --- 요약 리포트 CSV 저장 (추가된 부분) ---
+    summary_csv_file = f"PaniniServe_summary_{LOAD_LEVEL}.csv"
+    summary_data = {
+        "Metric": [
+            "Load_Level", "Total_Requests", "Completed_Requests", "Total_Elapsed_Time_s",
+            "Throughput_req_s", "Latency_SLO_Attainment_%", "System_Latency_P50_s",
+            "System_Latency_P95_s", "System_Latency_P99_s", "Accuracy_SLO_Attainment_%"
+        ],
+        "Value": [
+            LOAD_LEVEL, total_reqs, completed_reqs, round(exp_total_time, 2),
+            round(req_throughput, 3), round(latency_slo_rate, 2), round(p50_lat, 3),
+            round(p95_lat, 3), round(p99_lat, 3), round(acc_slo_rate, 2)
+        ]
+    }
+    pd.DataFrame(summary_data).to_csv(summary_csv_file, index=False)
+    print(f"[✔] 요약 분석 리포트 저장 완료 -> {os.path.abspath(summary_csv_file)}")
 
 # =====================================================================
 # 실행부
@@ -482,13 +535,10 @@ def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
 if __name__ == "__main__":
     prompt_pool = load_coco_prompts(coco_annotation_path, TOTAL_REQUESTS)
     reqs = generate_requests(LOAD_LEVEL, prompt_pool)
-    plan = plan_schedule(reqs)   # (1) 시뮬레이션으로 스케줄 먼저 결정
+    plan = plan_schedule(reqs)
 
     pipes = load_pipelines()
     warm_up(pipes, prompt_pool)
 
-    # 먼저 소수(예: 10개)만 대기 없이 빠르게 돌려서 프로파일 값 검증하고 싶으면:
-    # run_real_execution(plan[:10], pipes, realtime=False)
-
-    # 논문용 실제 결과 (원래 도착시각에 맞춰 sleep, 실제 부하 재현):
+    # 논문용 실제 결과 (도착시각에 맞춰 sleep, 실제 부하 재현)
     run_real_execution(plan, pipes, realtime=True, save_dir=f"outputs/panini_{LOAD_LEVEL}")
