@@ -106,7 +106,7 @@ INITIAL_MODEL = "small"
 
 # --- Model Profile (사전 프로파일링 값 -- 스케줄링 "결정"에만 쓰이는 예측치.
 #     실제 측정치는 실행 후 CSV의 System_Latency_s 컬럼에 별도로 기록됨) ---
-TIME_PER_STEP = {"small": 0.05526, "large": 0.28950}
+TIME_PER_STEP = {"small": 0.08093, "large": 0.39624}
 BASE_OVERHEAD = {"small": 0.09463, "large": 0.27221}
 SWITCH_TIME = {("small", "large"): 1.90, ("large", "small"): 6.31}
 
@@ -373,7 +373,7 @@ def switch_to(pipes: dict, model_name: str, current_on_gpu: Optional[str]) -> fl
         return 0.0
     t0 = time.time()
     if current_on_gpu is not None:
-        pipes[current_on_gpu].to("cpu")
+        pipes[current_on_gpu].to("cpu", silence_dtype_warnings=True)
     pipes[model_name].to(device)
     torch.cuda.synchronize()
     return time.time() - t0
