@@ -621,7 +621,111 @@ def plot_metric_by_load(results_by_load: Dict[str, Dict[str, float]], metric: st
 
 
 # =====================================================================
-# 9. 실행부 — 지금은 PaniniServe만 3단계 부하로 측정
+# 9. 실제 GPU 실행 (replay) — 스케줄러가 정한 순서/모델/step대로 진짜 파이프라인 호출
+# =====================================================================
+# 섹션 1~8은 전부 "시뮬레이터"로, TIME_PER_STEP/BASE_OVERHEAD/SWITCH_TIME
+# 프로파일링 숫자로 실행시간을 "예측"만 하고 실제로 이미지를 생성하진 않는다.
+# 이 섹션은 run_scheduler()가 만든 스케줄(순서/assigned_model/assigned_steps)을
+# 그대로 따라가면서, 진짜 SDv2.1 / SDv3.5-Medium 파이프라인을 호출해 실행한다.
+#
+# 두 가지 모드 제공:
+#   (A) fast validation : 대기 없이 바로바로 실행. 실제 생성시간/스위칭시간이
+#                          프로파일링 값과 비슷한지 "검증"하는 용도 (빠름, 몇 개만).
+#                          -> 이 모드로 나온 met/soft 판정은 논문에 쓰면 안 됨
+#                             (실제 대기시간이 사라져서 SLO가 실제보다 좋게 나옴).
+#   (B) real-time replay : 각 요청의 원래 도착시각(arrival)에 맞춰 실제로 sleep
+#                          하며 기다렸다가 실행. 진짜 큐잉 지연/혼잡이 재현되므로
+#                          논문에 낼 latency SLO/throughput 수치는 이 모드로 구해야 함.
+#                          (요청 수·부하에 따라 실행시간이 실제 그대로 오래 걸림)
+
+import time
+
+# 실제 사용 모델 ID (Model Profile 섹션 참고)
+MODEL_IDS = {
+    "small": "Manojb/stable-diffusion-2-1-base",          # SDv2.1
+    "large": "stabilityai/stable-diffusion-3.5-medium",     # SDv3.5-Medium
+}
+DEVICE = "cuda"
+
+
+def load_pipelines():
+    """두 diffusion 파이프라인을 로드한다 (torch/diffusers 필요, GPU 환경에서 실행).
+    처음엔 둘 다 CPU에 올려두고, switch_to()가 필요할 때마다 GPU로 옮긴다."""
+    import torch
+    from diffusers import StableDiffusionPipeline, StableDiffusion3Pipeline
+
+    pipe_small = StableDiffusionPipeline.from_pretrained(
+        MODEL_IDS["small"], torch_dtype=torch.float16, safety_checker=None
+    )
+    pipe_large = StableDiffusion3Pipeline.from_pretrained(
+        MODEL_IDS["large"], torch_dtype=torch.bfloat16
+    )
+    return {"small": pipe_small, "large": pipe_large}
+
+
+def switch_to(pipes: dict, model_name: str, current_on_gpu: Optional[str]) -> str:
+    """model_name을 GPU로 올리고(이미 올라와 있으면 아무 것도 안 함), 이전에
+    GPU에 있던 다른 모델은 CPU로 내려서 메모리를 비운다.
+    *** 본인이 SWITCH_TIME(1.90s/6.31s)을 실측하실 때 쓰신 전환 방식과 반드시
+    똑같이 맞춰야 프로파일 값과 실측 결과가 일관됩니다 (예: to('cuda')/to('cpu')
+    방식이 아니라 매번 새로 from_pretrained 하는 방식으로 재셨다면 여기도 그렇게
+    바꿔야 함). ***"""
+    if current_on_gpu == model_name:
+        return current_on_gpu
+    if current_on_gpu is not None:
+        pipes[current_on_gpu].to("cpu")
+    pipes[model_name].to(DEVICE)
+    return model_name
+
+
+def run_real_execution(executed_plan: List[Req], pipes: dict,
+                        realtime: bool, save_dir: Optional[str] = None) -> List[Req]:
+    """run_scheduler()가 만든 스케줄(executed_plan)을 그대로 따라가며 실제로 실행.
+
+    realtime=True  : 각 요청의 원래 arrival 시각에 맞춰 sleep 하고서 실행 (모드 B)
+    realtime=False : 대기 없이 결정된 순서대로 바로바로 실행 (모드 A, 검증용)
+
+    drop된 요청은 원래도 실행 안 하기로 한 것이므로 건너뛴다.
+    실행 후 각 요청의 start/end를 "예측치"에서 "실측치"로 덮어쓰고,
+    그 실측치를 기준으로 met/soft 상태를 다시 판정한다."""
+    current_on_gpu = None
+    t0 = time.time()
+
+    for r in executed_plan:
+        if r.dropped:
+            continue
+
+        if realtime:
+            # 원래 이 요청이 도착했어야 할 실제 시각까지 대기 (실제 큐잉/부하 재현)
+            wait = r.arrival - (time.time() - t0)
+            if wait > 0:
+                time.sleep(wait)
+
+        current_on_gpu = switch_to(pipes, r.assigned_model, current_on_gpu)
+
+        real_start = time.time() - t0
+        result = pipes[r.assigned_model](
+            prompt=r.prompt,
+            num_inference_steps=r.assigned_steps,
+        )
+        real_end = time.time() - t0
+
+        if save_dir is not None:
+            import os
+            os.makedirs(save_dir, exist_ok=True)
+            result.images[0].save(os.path.join(save_dir, f"req_{r.rid:03d}.png"))
+
+        # 예측 start/end를 실측값으로 교체하고, 실측 기준으로 met/soft 재판정
+        r.start, r.end = real_start, real_end
+        r.status = "met" if r.end <= r.deadline else "soft"
+        if r.status == "soft":
+            r.overage_pct = (r.end - r.deadline) / r.latency_slo * 100.0
+
+    return executed_plan
+
+
+# =====================================================================
+# 10. 실행부 — 지금은 PaniniServe만 3단계 부하로 측정
 #    (팀원 Clipper/INFaaS 결과가 오면 results_by_load[load]["Clipper-Large"] 등으로
 #     같은 dict에 합쳐서 plot_metric_by_load()를 그대로 재사용하면 됨)
 # =====================================================================
