@@ -83,10 +83,10 @@ monitor = GPUUtilMonitor(handle)
 # =====================================================================
 device = "cuda"
 coco_annotation_path = "/home/jslee/diffusion_exper/batch_exper/dataset/coco2014/annotation/captions_val2014.json"
-csv_output_file = "PaniniServe.csv"
+csv_output_file = "PaniniServe_medium.csv"
 
 TOTAL_REQUESTS = 300
-LOAD_LEVEL = "low"          # "low" | "medium" | "high" -- 돌릴 때마다 바꿔서 실행
+LOAD_LEVEL = "medium"          # "low" | "medium" | "high" -- 돌릴 때마다 바꿔서 실행
 WINDOW_SEC = 60.0
 
 RES = {"small": (768, 768), "large": (1024, 1024)}   # SDv2.1 / SDv3.5-Medium 해상도
