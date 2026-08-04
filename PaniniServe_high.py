@@ -95,13 +95,6 @@ MODEL_TYPES = ["small", "large", "auto"]
 ACCURACY_LEVELS = ["high", "medium", "low"]
 INITIAL_MODEL = "small"
 
-# --- Accuracy SLO용 부하 조건별 최소 요구 Step 기준 ---
-MIN_STEPS_THRESHOLD = {
-    "low": 10,
-    "medium": 20,
-    "high": 30
-}
-
 # --- Model Profile ---
 TIME_PER_STEP = {"small": 0.08093, "large": 0.39624}
 BASE_OVERHEAD = {"small": 0.09463, "large": 0.27221}
@@ -441,13 +434,16 @@ def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
         peak_mem = torch.cuda.max_memory_allocated() / 1024**3
 
         r.start, r.end = real_start, real_end
-        
+
         # --- 지표 계산 ---
         system_latency = real_end - r.arrival   # 전체 대기 포함 latency
         latency_slo_met = r.end <= r.deadline    # Latency SLO (met만 True)
-        
-        min_required_step = MIN_STEPS_THRESHOLD.get(LOAD_LEVEL, 20)
-        accuracy_slo_met = r.assigned_steps >= min_required_step  # Accuracy SLO
+
+        # [수정] accuracy SLO는 이 실행 전체의 LOAD_LEVEL이 아니라,
+        # 그 요청 "자신의" accuracy 레벨 최소 step(r.min_steps) 기준으로 판정해야 함.
+        # (MIN_STEPS_THRESHOLD.get(LOAD_LEVEL, ...)로 하면 부하수준을 accuracy로
+        #  착각해서 모든 요청이 같은 threshold를 적용받는 버그가 생김)
+        accuracy_slo_met = r.accuracy_met   # == r.assigned_steps >= r.min_steps
 
         r.status = "met" if latency_slo_met else "soft"
         if r.status == "soft":
@@ -507,11 +503,10 @@ def run_real_execution(plan: List[Req], pipes: dict, realtime: bool = True,
     print(f"  - System Latency P99     : {p99_lat:.3f} s")
     print("-" * 65)
     print(f" [Accuracy SLO]")
-    print(f"  - Min Required Steps     : {MIN_STEPS_THRESHOLD.get(LOAD_LEVEL, 20)} steps")
     print(f"  - Accuracy SLO Attainment: {acc_slo_rate:.2f}% ({acc_met_cnt}/{total_reqs})")
     print("=" * 65 + "\n")
 
-    # --- 요약 리포트 CSV 저장 (추가된 부분) ---
+    # --- 요약 리포트 CSV 저장 ---
     summary_csv_file = f"PaniniServe_summary_{LOAD_LEVEL}.csv"
     summary_data = {
         "Metric": [
